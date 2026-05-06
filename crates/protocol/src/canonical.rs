@@ -548,26 +548,20 @@ pub fn validate_against_caps(
     // 1. Hosted tools: reject if the provider doesn't support them
     for tool in &canonical.response_tools_raw {
         match tool {
-            ResponseTool::WebSearchPreview { .. } => {
-                if !caps.supports_hosted_web_search {
-                    return Err(crate::error::ApiError::hosted_tool_not_supported(
-                        "web_search",
-                    ));
-                }
+            ResponseTool::WebSearchPreview { .. } if !caps.supports_hosted_web_search => {
+                return Err(crate::error::ApiError::hosted_tool_not_supported(
+                    "web_search",
+                ));
             }
-            ResponseTool::FileSearch { .. } => {
-                if !caps.supports_hosted_file_search {
-                    return Err(crate::error::ApiError::hosted_tool_not_supported(
-                        "file_search",
-                    ));
-                }
+            ResponseTool::FileSearch { .. } if !caps.supports_hosted_file_search => {
+                return Err(crate::error::ApiError::hosted_tool_not_supported(
+                    "file_search",
+                ));
             }
-            ResponseTool::CodeInterpreter { .. } => {
-                if !caps.supports_code_interpreter {
-                    return Err(crate::error::ApiError::hosted_tool_not_supported(
-                        "code_interpreter",
-                    ));
-                }
+            ResponseTool::CodeInterpreter { .. } if !caps.supports_code_interpreter => {
+                return Err(crate::error::ApiError::hosted_tool_not_supported(
+                    "code_interpreter",
+                ));
             }
             ResponseTool::ComputerUse { .. } => {
                 return Err(crate::error::ApiError::hosted_tool_not_supported(
