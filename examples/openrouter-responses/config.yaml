@@ -1,0 +1,54 @@
+# ── OpenRouter Responses API (stateless beta) ──────────────────────
+# Codex-facing: Responses  │  Upstream: Native/Stateless Responses
+#
+# Upstream:     openrouter.ai/api/v1 /responses
+# Endpoint:     StatelessResponses
+# Reasoning:    OpenRouterReasoningDetails
+# State:        Adapter-store only (OpenRouter Responses is stateless)
+# Tools:        Function tools; web search is opt-in
+# Streaming:    Responses SSE
+#
+# OpenRouter's Responses beta does NOT persist conversation state.
+# Each request must carry the full history. The adapter materializes
+# stored history automatically when it receives previous_response_id.
+#
+# Web search is supported by OpenRouter but off by default.
+# Enable it explicitly: capabilities.supports_hosted_web_search: true
+
+server:
+  listen: "127.0.0.1:8787"
+  base_path: "/v1"
+
+upstream:
+  base_url: "https://openrouter.ai/api/v1"
+  api_key_env: "OPENROUTER_API_KEY"
+  # Optional: add custom HTTP headers
+  # http_headers:
+  #   HTTP-Referer: "https://codex.example.com"
+  #   X-Title: "Codex"
+
+provider:
+  kind: openrouter-responses
+  profile_config:
+    profile: openrouter-responses
+    capabilities:
+      supports_hosted_web_search: false   # set true to opt in
+      # OpenRouter's reasoning_details is a specific structure;
+      # the adapter maps it to Responses reasoning items.
+
+reasoning:
+  enabled: false          # OpenRouter handles reasoning natively
+  effort: high
+
+models:
+  default: "openai/gpt-5.4"
+  catalog:
+    - slug: "openai/gpt-5.4"
+      context_window: 131072
+
+state:
+  backend: memory          # use sqlite for longer TTL
+  ttl_seconds: 86400
+
+logging:
+  level: info

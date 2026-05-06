@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  quality:
+    name: Quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Core tests
+        run: cargo test
+
+      - name: Build shim once for mock E2E
+        run: cargo build -p codex-shim
+
+      - name: Build release binary
+        run: cargo build --release -p codex-shim
+
+      - name: Package smoke
+        run: |
+          python scripts/package_release.py \
+            --binary target/release/codex-shim \
+            --target x86_64-unknown-linux-gnu \
+            --version ci \
+            --output-dir target/dist-smoke
+
+      - name: Mock E2E
+        env:
+          CODEX_SHIM_BIN: ${{ github.workspace }}/target/debug/codex-shim
+        run: cargo test -p e2e-codex --test codex_mock -- --nocapture
+
+  platform-test:
+    name: Platform Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-13
+          - macos-14
+          - windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test workspace defaults
+        run: cargo test
+
+      - name: Build release binary
+        run: cargo build --release -p codex-shim

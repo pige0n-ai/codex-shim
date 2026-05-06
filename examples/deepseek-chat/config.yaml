@@ -1,0 +1,68 @@
+# ── DeepSeek via Chat Completions shim ────────────────────────────
+# Codex-facing: Responses  │  Upstream: Chat Completions (adapter-internal shim)
+#
+# Upstream:     api.deepseek.com /chat/completions
+# Endpoint:     ChatCompletionsShim
+# Reasoning:    DeepSeekReasoningContent (reasoning_content field)
+# State:        Adapter memory store
+# Tools:        function tools only (no hosted tools)
+# Streaming:    Chat Completions SSE
+#
+# DeepSeek's thinking mode requires the `thinking.type = "enabled"` field
+# in Chat Completion requests. The adapter injects this automatically.
+# Reasoning is recovered from stored responses when Codex drops reasoning
+# items across multi-turn tool calls.
+
+server:
+  listen: "127.0.0.1:8787"
+  base_path: "/v1"
+  cors:
+    enabled: false
+  auth:
+    mode: optional-bearer
+
+upstream:
+  base_url: "https://api.deepseek.com"
+  chat_path: "/chat/completions"
+  models_path: "/models"
+  api_key_env: "DEEPSEEK_API_KEY"
+  timeout_seconds: 900
+  connect_timeout_seconds: 30
+  max_retries: 2
+
+provider:
+  kind: deepseek-chat
+  profile_config:
+    profile: deepseek-chat
+    # Optionally override capability flags:
+    # capabilities:
+    #   supports_parallel_tool_calls: false
+    #   supports_json_schema: false
+    #   supports_vision_input: false
+
+reasoning:
+  enabled: true
+  effort: high          # deepseek effort mapping: minimal/low/medium → high, xhigh → max
+  expose_reasoning_to_client: false
+  persist_reasoning_for_tool_calls: true
+
+models:
+  default: "deepseek-v4-pro"
+  map:
+    deepseek-v4-pro: "deepseek-v4-pro"
+    codex-default: "deepseek-v4-pro"
+  catalog:
+    - slug: "deepseek-v4-pro"
+      context_window: 131072
+
+state:
+  backend: memory          # memory | sqlite
+  ttl_seconds: 86400       # 24h
+  cleanup_interval_seconds: 3600
+  # sqlite_path: "~/.codex-shim/store.db"
+
+logging:
+  level: info
+  redact_api_keys: true
+  redact_message_content: false
+  log_sse_events: false

@@ -1,0 +1,17 @@
+# ── Ollama via Responses API (stateless) ───────────────────────────
+# Codex-facing: Responses  │  Upstream: Native/Stateless Responses
+server:
+  listen: "127.0.0.1:8787"
+upstream:
+  base_url: "http://127.0.0.1:11434/v1"
+provider:
+  kind: ollama-responses
+  profile_config:
+    profile: ollama-responses
+models:
+  default: "qwen3.5:32b"
+  catalog:
+    - slug: "qwen3.5:32b"
+      context_window: 131072
+state:
+  backend: memory

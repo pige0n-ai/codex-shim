@@ -1,0 +1,32 @@
+[package]
+name = "e2e-codex"
+version = "0.1.0"
+edition = "2024"
+description = "E2E tests for codex-shim using codex exec + mock upstream"
+
+[[test]]
+name = "codex_mock"
+path = "tests/codex_mock.rs"
+
+[[test]]
+name = "codex_live"
+path = "tests/codex_live.rs"
+
+[dependencies]
+protocol = { path = "../protocol" }
+tokio = { workspace = true, features = ["full"] }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+anyhow = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+tempfile = "3"
+tokio-util = "0.7"
+futures = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+rand = "0.8"
+async-stream = "0.3"
+toml = "0.8"

@@ -1,0 +1,20 @@
+# ── Alibaba Cloud DashScope / Model Studio Responses API ──────────
+server:
+  listen: "127.0.0.1:8787"
+upstream:
+  base_url: "https://dashscope.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1"
+  api_key_env: "DASHSCOPE_API_KEY"
+provider:
+  kind: alibaba-responses
+  profile_config:
+    profile: alibaba-responses
+    extra_body:
+      enable_thinking: true
+models:
+  default: "qwen3.5-max"
+  catalog:
+    - slug: "qwen3.5-max"
+      context_window: 131072
+state:
+  backend: memory
+  ttl_seconds: 604800

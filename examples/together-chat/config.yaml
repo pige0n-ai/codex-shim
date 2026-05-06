@@ -1,0 +1,16 @@
+# ── Together AI Chat Completions ───────────────────────────────────
+# Codex-facing: Responses  │  Upstream: Chat Completions (adapter-internal shim)
+server:
+  listen: "127.0.0.1:8787"
+upstream:
+  base_url: "https://api.together.xyz/v1"
+  chat_path: "/chat/completions"
+  api_key_env: "TOGETHER_API_KEY"
+provider:
+  kind: together-chat
+  profile_config:
+    profile: together-chat
+    capabilities:
+      supports_parallel_tool_calls: true
+state:
+  backend: memory

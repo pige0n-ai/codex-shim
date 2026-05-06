@@ -1,0 +1,56 @@
+# ── vLLM via native Responses API ──────────────────────────────────
+# Codex-facing: Responses  │  Upstream: Native/Stateless Responses
+#
+# Upstream:     http://localhost:8000/v1 /responses
+# Endpoint:     NativeResponses
+# Reasoning:    OpenAIResponsesReasoningItem (native reasoning output item)
+# State:        Adapter memory store (vLLM Responses is stateless)
+# Tools:        NativeResponsesTools (function tools pass through natively)
+# Streaming:    Responses SSE
+#
+# vLLM (>= 0.11) supports both /v1/responses and /v1/chat/completions.
+# Using /responses preserves the native event stream, reasoning items,
+# and tool call semantics without protocol translation.
+# If your vLLM version only has /chat/completions, switch to profile "vllm-chat".
+
+server:
+  listen: "127.0.0.1:8787"
+  base_path: "/v1"
+
+upstream:
+  base_url: "http://127.0.0.1:8000/v1"
+  # vLLM typically doesn't require auth locally:
+  api_key_env: "VLLM_API_KEY"
+  timeout_seconds: 900
+  connect_timeout_seconds: 30
+  max_retries: 2
+
+provider:
+  kind: vllm-responses
+  profile_config:
+    profile: vllm-responses
+    # Tune to match the model you'll serve:
+    # capabilities:
+    #   supports_function_tools: true
+    #   supports_parallel_tool_calls: true
+    #   supports_vision_input: true
+    #   supports_json_schema: true
+    #   supports_reasoning_effort: true
+
+reasoning:
+  enabled: false          # vLLM handles reasoning natively in Responses items
+  effort: high
+
+models:
+  default: "Qwen/Qwen3.5-32B"
+  catalog:
+    - slug: "Qwen/Qwen3.5-32B"
+      context_window: 131072
+
+state:
+  backend: memory
+
+logging:
+  level: info
+  redact_api_keys: true
+  log_sse_events: true    # debug native response events

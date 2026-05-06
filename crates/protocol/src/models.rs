@@ -1,0 +1,170 @@
+use serde::{Deserialize, Serialize};
+
+use crate::provider_caps::ProviderCapabilities;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelsResponse {
+    pub models: Vec<ModelInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelInfo {
+    pub slug: String,
+    pub display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_reasoning_level: Option<String>,
+    pub supported_reasoning_levels: Vec<ReasoningEffortPreset>,
+    pub context_window: i64,
+    pub max_context_window: i64,
+    pub effective_context_window_percent: i64,
+    pub shell_type: String,
+    pub visibility: String,
+    pub supported_in_api: bool,
+    pub priority: i32,
+    pub supports_parallel_tool_calls: bool,
+    pub input_modalities: Vec<String>,
+    pub default_reasoning_summary: String,
+    pub supports_reasoning_summaries: bool,
+    pub support_verbosity: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_verbosity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apply_patch_tool_type: Option<String>,
+    pub truncation_policy: TruncationPolicyConfig,
+    pub supports_image_detail_original: bool,
+    pub supports_search_tool: bool,
+    pub experimental_supported_tools: Vec<String>,
+    pub additional_speed_tiers: Vec<String>,
+    pub base_instructions: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_compact_token_limit: Option<i64>,
+    #[serde(default = "default_web_search_tool_type")]
+    pub web_search_tool_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReasoningEffortPreset {
+    pub effort: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TruncationPolicyConfig {
+    pub mode: String,
+    pub limit: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CatalogModelSpec {
+    pub slug: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub context_window: i64,
+    #[serde(default)]
+    pub tool_calling: Option<bool>,
+    #[serde(default)]
+    pub vision: Option<bool>,
+    #[serde(default)]
+    pub reasoning_levels: Option<Vec<String>>,
+    #[serde(default)]
+    pub priority: Option<i32>,
+    #[serde(default)]
+    pub base_instructions: Option<String>,
+    #[serde(default)]
+    pub auto_compact_token_limit: Option<i64>,
+    #[serde(default)]
+    pub supports_search_tool: Option<bool>,
+    #[serde(default)]
+    pub supports_reasoning_summaries: Option<bool>,
+    #[serde(default)]
+    pub apply_patch_tool_type: Option<String>,
+    #[serde(default)]
+    pub supports_image_detail_original: Option<bool>,
+}
+
+pub fn build_model_catalog(
+    specs: &[CatalogModelSpec],
+    caps: &ProviderCapabilities,
+) -> ModelsResponse {
+    ModelsResponse {
+        models: specs
+            .iter()
+            .map(|spec| build_model_info(spec, caps))
+            .collect(),
+    }
+}
+
+pub fn build_model_info(spec: &CatalogModelSpec, caps: &ProviderCapabilities) -> ModelInfo {
+    let reasoning_levels = spec.reasoning_levels.clone().unwrap_or_else(|| {
+        if caps.supports_reasoning_effort {
+            vec!["high".to_string()]
+        } else {
+            Vec::new()
+        }
+    });
+    let default_reasoning_level = reasoning_levels.first().cloned();
+    let tool_calling = spec.tool_calling.unwrap_or(caps.supports_function_tools);
+    let vision = spec.vision.unwrap_or(caps.supports_vision_input);
+
+    let mut input_modalities = vec!["text".to_string()];
+    if vision {
+        input_modalities.push("image".to_string());
+    }
+
+    ModelInfo {
+        slug: spec.slug.clone(),
+        display_name: spec
+            .display_name
+            .clone()
+            .unwrap_or_else(|| spec.slug.clone()),
+        description: spec
+            .description
+            .clone()
+            .or_else(|| Some(format!("{} via codex-shim", spec.slug))),
+        default_reasoning_level,
+        supported_reasoning_levels: reasoning_levels
+            .into_iter()
+            .map(|effort| ReasoningEffortPreset {
+                effort,
+                description: String::new(),
+            })
+            .collect(),
+        context_window: spec.context_window,
+        max_context_window: spec.context_window,
+        effective_context_window_percent: 95,
+        shell_type: if tool_calling {
+            "unified_exec".into()
+        } else {
+            "disabled".into()
+        },
+        visibility: "list".into(),
+        supported_in_api: true,
+        priority: spec.priority.unwrap_or(10),
+        supports_parallel_tool_calls: caps.supports_parallel_tool_calls,
+        input_modalities,
+        default_reasoning_summary: "none".into(),
+        supports_reasoning_summaries: spec.supports_reasoning_summaries.unwrap_or(false),
+        support_verbosity: false,
+        default_verbosity: None,
+        apply_patch_tool_type: spec.apply_patch_tool_type.clone(),
+        truncation_policy: TruncationPolicyConfig {
+            mode: "tokens".into(),
+            limit: 10_000,
+        },
+        supports_image_detail_original: spec.supports_image_detail_original.unwrap_or(false),
+        supports_search_tool: spec.supports_search_tool.unwrap_or(false),
+        experimental_supported_tools: Vec::new(),
+        additional_speed_tiers: Vec::new(),
+        base_instructions: spec.base_instructions.clone().unwrap_or_default(),
+        auto_compact_token_limit: spec.auto_compact_token_limit,
+        web_search_tool_type: default_web_search_tool_type(),
+    }
+}
+
+fn default_web_search_tool_type() -> String {
+    "text".into()
+}

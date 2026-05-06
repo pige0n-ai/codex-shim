@@ -1,0 +1,48 @@
+# ── Codex provider config pointing to local codex-shim adapter ────
+#
+# 放到 $CODEX_HOME/config.toml 中，或使用 --profile 加载。
+# 默认路径通常是：
+#   macOS / Linux: ~/.codex/config.toml
+#   Windows: %USERPROFILE%\.codex\config.toml
+# 本配置让 Codex 通过本地 codex-shim 访问上游 provider。
+#
+# 给 Codex 的 provider 必须使用 wire_api = "responses"。
+# Chat Completions 仅在 adapter 内部作为上游协议存在。
+
+model_provider = "local-shim"
+model = "your-model-slug"
+
+[model_providers.local-shim]
+name = "codex-shim"
+base_url = "http://127.0.0.1:8787/v1"
+env_key = "LOCAL_SHIM_TOKEN"
+# wire_api 只有 "responses" 一个公开支持值
+wire_api = "responses"
+
+# ⚠️ 必须显式关闭 WebSocket，因为 codex-shim 只支持 HTTP/SSE。
+# 如果省略此配置，Codex 会优先尝试 WebSocket，可能产生额外延迟和噪声。
+supports_websockets = false
+
+# ── 可选配置 ──
+# 自定义 HTTP headers（如果上游需要）：
+# http_headers = { "X-Example" = "value" }
+# env_http_headers = { "X-Features" = "MY_FEATURES" }
+#
+# 超时与重试：
+# request_max_retries = 4
+# stream_max_retries = 5
+# stream_idle_timeout_ms = 300000
+
+# ── 模型选择 ──
+# model_catalog_json 现在更适合作为离线 pin / 手工覆盖。
+# 默认情况下，codex-shim 会通过 /models 提供 shim-native catalog。
+# 如需固定模型元数据，可使用 codex-shim generate-catalog 生成文件。
+# model_catalog_json = "/path/to/deepseek-models.json"
+
+# ── 认证 ──
+# 如果不需要 token 校验，直接设置环境变量：
+# macOS / Linux:
+# export LOCAL_SHIM_TOKEN="sk-any-value"
+#
+# Windows PowerShell:
+# $env:LOCAL_SHIM_TOKEN = "sk-any-value"

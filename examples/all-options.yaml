@@ -1,0 +1,61 @@
+# ==============================================================================
+#  codex-shim — complete configuration reference (all keys with defaults)
+# ==============================================================================
+#  This file lists every supported config key and its default value.
+#  Use it as a reference; copy sections into your own config.yaml as needed.
+# ==============================================================================
+
+server:
+  listen: 127.0.0.1:8787
+  base_path: /v1
+  cors:
+    enabled: false
+  auth:
+    mode: optional-bearer
+    accepted_bearer_tokens: []
+upstream:
+  base_url: https://api.deepseek.com
+  chat_path: /chat/completions
+  responses_path: /responses
+  models_path: /models
+  api_key_env: DEEPSEEK_API_KEY
+  query_params: {}
+  http_headers: {}
+  env_http_headers: {}
+  requires_openai_auth: false
+  auth_command: null
+  timeout_seconds: 900
+  connect_timeout_seconds: 30
+  max_retries: 2
+provider:
+  kind: deepseek-chat
+  mode: ''
+  profile_config:
+    profile: deepseek-chat
+    capabilities: null
+    extra_body: null
+models:
+  default: deepseek-v4-pro
+  map:
+    deepseek-v4-pro: deepseek-v4-pro
+    codex-default: deepseek-v4-pro
+  catalog:
+    - slug: deepseek-v4-pro
+      context_window: 131072
+reasoning:
+  enabled: true
+  effort: high
+  expose_reasoning_to_client: false
+  persist_reasoning_for_tool_calls: true
+state:
+  backend: memory
+  ttl_seconds: 86400
+  cleanup_interval_seconds: 3600
+  # Defaults to ~/.codex-shim/store.db on macOS/Linux and
+  # %USERPROFILE%\.codex-shim\store.db on Windows when backend=sqlite.
+  sqlite_path: null
+logging:
+  level: info
+  redact_api_keys: true
+  redact_message_content: false
+  log_sse_events: false

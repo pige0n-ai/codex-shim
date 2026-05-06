@@ -1,0 +1,56 @@
+# ── Generic OpenAI-compatible Chat Completions backend ─────────────
+# Codex-facing: Responses  │  Upstream: Chat Completions (adapter-internal shim)
+#
+# Use this profile for any provider that speaks /v1/chat/completions
+# but isn't handled by a dedicated profile: Together AI, Fireworks,
+# Groq Chat, llama.cpp (Chat mode), any self-hosted vLLM/TGI, etc.
+#
+# Conservative defaults: function tools only, no hosted tools,
+# no reasoning unless configured.
+
+server:
+  listen: "127.0.0.1:8787"
+  base_path: "/v1"
+
+upstream:
+  base_url: "https://api.example.com/v1"
+  chat_path: "/chat/completions"
+  models_path: "/models"
+  api_key_env: "PROVIDER_API_KEY"
+  timeout_seconds: 300
+  connect_timeout_seconds: 30
+  max_retries: 2
+
+provider:
+  kind: generic-chat
+  profile_config:
+    profile: generic-chat
+    # Override for specific backends:
+    # capabilities:
+    #   supports_parallel_tool_calls: true   # Together/Fireworks
+    #   supports_vision_input: true          # if multimodal model
+    #   supports_json_object: true
+    #   supports_reasoning_effort: true      # if reasoning model
+    #   reasoning_policy: generic_reasoning_content
+
+reasoning:
+  enabled: false          # enable only if the model emits reasoning_content
+  effort: high
+
+models:
+  default: "model-slug"
+  map:
+    codex-default: "model-slug"
+  catalog:
+    - slug: "model-slug"
+      context_window: 131072
+
+state:
+  backend: memory              # memory | sqlite
+  ttl_seconds: 86400
+  cleanup_interval_seconds: 3600
+  # sqlite_path: "~/.codex-shim/store.db"
+
+logging:
+  level: info
+  redact_api_keys: true

@@ -1,0 +1,40 @@
+# ── Ollama via Chat Completions ────────────────────────────────────
+# Codex-facing: Responses  │  Upstream: Chat Completions (adapter-internal shim)
+#
+# Upstream:     localhost:11434/v1 /chat/completions
+# Endpoint:     ChatCompletionsShim
+# Reasoning:    GenericReasoningContent (if model emits reasoning_content)
+# Tools:        FunctionToolsOnly
+#
+# Ollama ≥ 0.13 also supports /v1/responses (stateless).
+# If you prefer the Responses path, use profile "ollama-responses".
+# This config uses the stable Chat Completions path.
+
+server:
+  listen: "127.0.0.1:8787"
+
+upstream:
+  base_url: "http://127.0.0.1:11434/v1"
+  chat_path: "/chat/completions"
+
+provider:
+  kind: ollama-chat
+  profile_config:
+    profile: ollama-chat
+    # capabilities:
+    #   supports_structured_outputs: false  # depends on model
+
+reasoning:
+  enabled: false          # most Ollama models don't emit reasoning_content
+
+models:
+  default: "qwen3.5:32b"
+  catalog:
+    - slug: "qwen3.5:32b"
+      context_window: 131072
+
+state:
+  backend: memory
+
+logging:
+  level: info

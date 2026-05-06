@@ -1,0 +1,14 @@
+# ── Fireworks AI Chat Completions ──────────────────────────────────
+# Codex-facing: Responses  │  Upstream: Chat Completions (adapter-internal shim)
+server:
+  listen: "127.0.0.1:8787"
+upstream:
+  base_url: "https://api.fireworks.ai/inference/v1"
+  chat_path: "/chat/completions"
+  api_key_env: "FIREWORKS_API_KEY"
+provider:
+  kind: fireworks-chat
+  profile_config:
+    profile: fireworks-chat
+state:
+  backend: memory

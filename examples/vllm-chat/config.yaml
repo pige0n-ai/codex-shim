@@ -1,0 +1,15 @@
+# ── vLLM via Chat Completions (legacy mode) ────────────────────────
+# Codex-facing: Responses  │  Upstream: Chat Completions (adapter-internal shim)
+server:
+  listen: "127.0.0.1:8787"
+upstream:
+  base_url: "http://127.0.0.1:8000/v1"
+  chat_path: "/chat/completions"
+provider:
+  kind: vllm-chat
+  profile_config:
+    profile: vllm-chat
+reasoning:
+  enabled: false
+state:
+  backend: memory

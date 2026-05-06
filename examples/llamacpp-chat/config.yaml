@@ -1,0 +1,21 @@
+# ── llama.cpp server via Chat Completions ──────────────────────────
+# Codex-facing: Responses  │  Upstream: Chat Completions (adapter-internal shim)
+server:
+  listen: "127.0.0.1:8787"
+upstream:
+  base_url: "http://127.0.0.1:8080/v1"
+  chat_path: "/chat/completions"
+provider:
+  kind: llamacpp-chat
+  profile_config:
+    profile: llamacpp-chat
+    capabilities:
+      supports_function_tools: true
+      supports_json_object: true
+models:
+  default: "local-model"
+  catalog:
+    - slug: "local-model"
+      context_window: 131072
+state:
+  backend: memory

@@ -1,0 +1,1 @@
+Return exactly the string CODEX_SHIM_E2E_OK and nothing else. Do not inspect files. Do not run commands.

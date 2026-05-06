@@ -1,0 +1,43 @@
+# ── SGLang via Chat Completions ────────────────────────────────────
+# Codex-facing: Responses  │  Upstream: Chat Completions (adapter-internal shim)
+#
+# Upstream:     localhost:30000/v1 /chat/completions
+# Endpoint:     ChatCompletionsShim
+# Reasoning:    SGLangReasoningContent (requires chat_template_kwargs)
+# Tools:        FunctionToolsOnly
+#
+# SGLang injects `chat_template_kwargs: { thinking: true }` via
+# extra_body to enable reasoning parsing. The reasoning_content is
+# returned in `delta.reasoning_content` for streaming and
+# `message.reasoning_content` for non-streaming.
+#
+# SGLang also supports separate_reasoning for some models.
+
+server:
+  listen: "127.0.0.1:8787"
+
+upstream:
+  base_url: "http://127.0.0.1:30000/v1"
+  chat_path: "/chat/completions"
+
+provider:
+  kind: sglang-chat
+  profile_config:
+    profile: sglang-chat
+    extra_body:
+      chat_template_kwargs:
+        thinking: true
+      # separate_reasoning: true   # enable for models that need it
+
+reasoning:
+  enabled: true
+  effort: high
+
+models:
+  default: "deepseek-ai/DeepSeek-V3.1"
+  catalog:
+    - slug: "deepseek-ai/DeepSeek-V3.1"
+      context_window: 131072
+
+state:
+  backend: memory
