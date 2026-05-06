@@ -6,9 +6,21 @@ upstream:
   base_url: "https://openrouter.ai/api/v1"
   chat_path: "/chat/completions"
   api_key_env: "OPENROUTER_API_KEY"
+  # Optional: add your own attribution headers if desired.
+  # http_headers:
+  #   HTTP-Referer: "https://your-app.example"
+  #   X-Title: "Codex"
 provider:
   kind: openrouter-chat
   profile_config:
     profile: openrouter-chat
+models:
+  # Replace both fields with the OpenRouter model slug you want Codex to use.
+  default: "your-openrouter-model"
+  catalog:
+    - slug: "your-openrouter-model"
+      context_window: 131072
 state:
   backend: memory
+logging:
+  level: info

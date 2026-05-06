@@ -18,3 +18,5 @@ models:
 state:
   backend: memory
   ttl_seconds: 604800
+logging:
+  level: info

@@ -19,3 +19,5 @@ models:
       context_window: 131072
 state:
   backend: memory
+logging:
+  level: info

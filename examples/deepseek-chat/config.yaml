@@ -47,6 +47,13 @@ reasoning:
   persist_reasoning_for_tool_calls: true
 
 models:
+  # Codex learns model metadata from codex-shim's /models endpoint.
+  # The source of truth for that endpoint is models.catalog below.
+  #
+  # Keep these aligned:
+  #   - Codex config.toml: model = "deepseek-v4-pro"
+  #   - this file: models.default
+  #   - this file: models.catalog[*].slug
   default: "deepseek-v4-pro"
   map:
     deepseek-v4-pro: "deepseek-v4-pro"
@@ -54,6 +61,11 @@ models:
   catalog:
     - slug: "deepseek-v4-pro"
       context_window: 131072
+      # If omitted, reasoning_levels would default from the provider capability
+      # preset. DeepSeek supports reasoning effort, so the derived default would
+      # be ["high"].
+      reasoning_levels:
+        - high
 
 state:
   backend: memory          # memory | sqlite

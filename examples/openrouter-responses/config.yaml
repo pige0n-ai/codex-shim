@@ -1,4 +1,4 @@
-# ── OpenRouter Responses API (stateless beta) ──────────────────────
+# ── OpenRouter Responses API ───────────────────────────────────────
 # Codex-facing: Responses  │  Upstream: Native/Stateless Responses
 #
 # Upstream:     openrouter.ai/api/v1 /responses
@@ -8,9 +8,9 @@
 # Tools:        Function tools; web search is opt-in
 # Streaming:    Responses SSE
 #
-# OpenRouter's Responses beta does NOT persist conversation state.
-# Each request must carry the full history. The adapter materializes
-# stored history automatically when it receives previous_response_id.
+# codex-shim currently treats this profile as stateless. Each request carries
+# full history, and the adapter materializes stored history automatically when
+# it receives previous_response_id.
 #
 # Web search is supported by OpenRouter but off by default.
 # Enable it explicitly: capabilities.supports_hosted_web_search: true
@@ -41,9 +41,10 @@ reasoning:
   effort: high
 
 models:
-  default: "openai/gpt-5.4"
+  # Replace both fields with the OpenRouter model slug you want Codex to use.
+  default: "your-openrouter-model"
   catalog:
-    - slug: "openai/gpt-5.4"
+    - slug: "your-openrouter-model"
       context_window: 131072
 
 state:

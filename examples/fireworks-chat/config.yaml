@@ -10,5 +10,13 @@ provider:
   kind: fireworks-chat
   profile_config:
     profile: fireworks-chat
+models:
+  # Replace both fields with a model that exists in your Fireworks account.
+  default: "accounts/fireworks/models/your-model"
+  catalog:
+    - slug: "accounts/fireworks/models/your-model"
+      context_window: 131072
 state:
   backend: memory
+logging:
+  level: info

@@ -152,7 +152,7 @@ jobs:
   platform-build:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-13, macos-14, windows-latest]
+        os: [ubuntu-latest, macos-15-intel, macos-15, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - run: cargo test

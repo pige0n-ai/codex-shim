@@ -1,46 +1,32 @@
+# ── Legacy DeepSeek example path ────────────────────────────────────
+# Prefer examples/deepseek-chat/config.yaml for the recommended profile name.
+# This file stays here for users who already reference examples/deepseek/.
+
 server:
   listen: "127.0.0.1:8787"
-  base_path: "/v1"
 
 upstream:
   base_url: "https://api.deepseek.com"
   chat_path: "/chat/completions"
-  models_path: "/models"
   api_key_env: "DEEPSEEK_API_KEY"
-  timeout_seconds: 900
-  connect_timeout_seconds: 30
-  max_retries: 2
 
 provider:
-  kind: deepseek
-  thinking:
-    enabled: true
-    effort: high
-    drop_sampling_params_when_thinking: true
-
-models:
-  default: "deepseek-v4-pro"
-  map:
-    deepseek-v4-pro: "deepseek-v4-pro"
-    codex-default: "deepseek-v4-pro"
-  catalog:
-    - slug: "deepseek-v4-pro"
-      context_window: 131072
+  kind: deepseek-chat
+  profile_config:
+    profile: deepseek-chat
 
 reasoning:
   enabled: true
   effort: high
-  expose_reasoning_to_client: false
-  persist_reasoning_for_tool_calls: true
-  deepseek_drop_sampling_params_when_thinking: true
+
+models:
+  default: "deepseek-v4-pro"
+  catalog:
+    - slug: "deepseek-v4-pro"
+      context_window: 131072
 
 state:
   backend: memory
-  ttl_seconds: 86400
-  cleanup_interval_seconds: 3600
 
 logging:
   level: info
-  redact_api_keys: true
-  redact_message_content: false
-  log_sse_events: false

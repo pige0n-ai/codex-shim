@@ -12,5 +12,13 @@ provider:
     profile: together-chat
     capabilities:
       supports_parallel_tool_calls: true
+models:
+  # Replace both fields with a Together model slug available to your account.
+  default: "your-together-model"
+  catalog:
+    - slug: "your-together-model"
+      context_window: 131072
 state:
   backend: memory
+logging:
+  level: info

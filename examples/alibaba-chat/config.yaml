@@ -14,5 +14,12 @@ provider:
       enable_thinking: true
     capabilities:
       supports_vision_input: true
+models:
+  default: "qwen3.5-max"
+  catalog:
+    - slug: "qwen3.5-max"
+      context_window: 131072
 state:
   backend: memory
+logging:
+  level: info

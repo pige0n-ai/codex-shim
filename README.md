@@ -29,65 +29,100 @@ runners for each platform.
 
 ## Quick Start
 
+The intended path is: download a release archive, unpack it, start the shim
+with one bundled example config, then point Codex at `http://127.0.0.1:8787/v1`.
+
+If you want the fastest post-download setup path, or a full explanation of how
+`profile_config`, `models.catalog`, and Codex's `config.toml` fit together, see
+[docs/configuration.md](/home/vivec/codex-shim/docs/configuration.md).
+
+### Use A Release Binary
+
+1. Download the archive for your platform from
+   [Releases](https://github.com/pige0n-ai/codex-shim/releases/latest).
+2. Unpack it.
+3. Open the unpacked directory; it already contains the binary, `examples/`,
+   `README.md`, and `LICENSE`.
+
+Linux / macOS:
+
 ```bash
-# Build from source
-cargo build --release -p codex-shim
+tar -xzf codex-shim-<version>-<target>.tar.gz
+cd codex-shim-<version>-<target>
 
-# Run with DeepSeek
 export DEEPSEEK_API_KEY="sk-..."
-./target/release/codex-shim --config examples/deepseek-chat/config.yaml
-
-# Run with Ollama
-./target/release/codex-shim --config examples/ollama-chat/config.yaml
+export LOCAL_SHIM_TOKEN="local-shim-dev-token"
+./codex-shim --config examples/deepseek-chat/config.yaml
 ```
 
 Windows PowerShell:
 
 ```powershell
-cargo build --release -p codex-shim
+Expand-Archive .\codex-shim-<version>-x86_64-pc-windows-msvc.zip
+cd .\codex-shim-<version>-x86_64-pc-windows-msvc
 
 $env:DEEPSEEK_API_KEY = "sk-..."
-.\target\release\codex-shim.exe --config examples\deepseek-chat\config.yaml
+$env:LOCAL_SHIM_TOKEN = "local-shim-dev-token"
+.\codex-shim.exe --config .\examples\deepseek-chat\config.yaml
 ```
 
-Published release archives include the platform binary, `README.md`,
-`LICENSE`, and the `examples/` directory.
+Then point Codex at the shim by adding the provider block from
+`examples/codex-config/config.toml` into `$CODEX_HOME/config.toml`.
+Set `model` there to the same slug used by your chosen shim YAML file.
+After that, use Codex normally:
+
+```bash
+codex
+# or
+codex exec "Explain this repository"
+```
+
+### Build From Source
+
+```bash
+cargo build --release -p codex-shim
+export DEEPSEEK_API_KEY="sk-..."
+export LOCAL_SHIM_TOKEN="local-shim-dev-token"
+./target/release/codex-shim --config examples/deepseek-chat/config.yaml
+```
 
 ## Codex Provider Config
 
 In `$CODEX_HOME/config.toml`:
 
 ```toml
-model_provider = "local-shim"
-model = "your-model-slug"
+model_provider = "codex_shim"
+model = "deepseek-v4-pro"
 
-# Chat Completions upstreams cannot execute hosted tools.
-# Disable web_search so Codex does not send hosted web_search tools.
+# Most shim profiles ultimately target Chat Completions upstreams, so hosted
+# web search should start disabled. If you use a native Responses provider that
+# really supports hosted search through the shim, switch this to "cached" or
+# "live" and advertise that support in the shim model catalog.
 web_search = "disabled"
 
-[tools]
-web_search = false
-
-[features]
-web_search_request = false
-
-[model_providers.local-shim]
+[model_providers.codex_shim]
 name = "codex-shim"
 base_url = "http://127.0.0.1:8787/v1"
 env_key = "LOCAL_SHIM_TOKEN"
-wire_api = "responses"
-supports_websockets = false  # REQUIRED: shim is HTTP/SSE only
+env_key_instructions = "Set LOCAL_SHIM_TOKEN before starting Codex."
+wire_api = "responses"        # explicit for clarity; this is also the default
+supports_websockets = false   # REQUIRED: codex-shim is HTTP/SSE only
 ```
 
 > **Codex Configuration Notes**
 >
-> - `wire_api = "responses"` is required — Codex always sees the Responses API.
+> - `model_provider` must reference a custom entry under `model_providers`.
+> - The official Codex config docs reserve `openai`, `ollama`, `lmstudio`,
+>   and `amazon-bedrock` as built-in provider IDs, so use a different custom ID.
+> - `wire_api = "responses"` is the only supported provider protocol in Codex.
 > - `supports_websockets = false` is required — shim only supports HTTP/SSE.
-> - For Chat Completions upstreams, disable `web_search` as shown above.
->   Without this, Codex may send hosted `web_search` tools, and the shim
->   will correctly reject them with `not_implemented`.
-> - If your upstream is a Native Responses provider that supports hosted
->   tools, you may enable `web_search` and remove the `[tools]`/`[features]` blocks.
+> - Top-level `web_search` is the current Codex setting. The older
+>   `features.web_search*` toggles are deprecated in the official config reference.
+> - For Chat Completions upstreams, keep `web_search = "disabled"` as shown above.
+>   Without this, Codex may send hosted `web_search` tools that the shim
+>   correctly rejects.
+> - If your upstream is a native/stateless Responses provider that supports hosted
+>   search through the shim, you may change `web_search` to `cached` or `live`.
 > - The shim now serves its own `/models` catalog. `model_catalog_json` is
 >   optional and best treated as an offline pin or manual override, not the
 >   primary discovery path.
@@ -95,6 +130,8 @@ supports_websockets = false  # REQUIRED: shim is HTTP/SSE only
 >   `%USERPROFILE%\\.codex` on Windows when `CODEX_HOME` is unset.
 
 See `examples/codex-config/config.toml` for the full annotated example.
+For the complete end-to-end configuration flow, see
+[docs/configuration.md](/home/vivec/codex-shim/docs/configuration.md).
 
 ## Default Paths
 
@@ -122,7 +159,7 @@ separate authentication layers:
    shim config:
    ```bash
    export DEEPSEEK_API_KEY="sk-..."
-   ./target/release/codex-shim --config examples/deepseek-chat/config.yaml
+   ./codex-shim --config examples/deepseek-chat/config.yaml
    ```
    For proxy/forwarding setups where an external layer handles authentication,
    set `upstream.requires_openai_auth: true` — this disables adapter-side Bearer
@@ -161,6 +198,45 @@ to upstream providers.
 | `generic-chat` | (configurable) | Chat Shim | generic |
 
 Detailed config per provider in `examples/<profile>/config.yaml`.
+
+## Example Configs
+
+Every bundled `examples/<profile>/config.yaml` is meant to be runnable after you:
+
+- set the required API key environment variable if the provider is remote
+- replace any `your-...-model` placeholder with a real model slug from that provider
+- keep `models.default` and `models.catalog[0].slug` in sync
+
+If you only want one path to copy first, start with:
+
+- `examples/deepseek-chat/config.yaml` for a hosted Chat Completions provider
+- `examples/openrouter-responses/config.yaml` for a stateless Responses provider
+- `examples/ollama-chat/config.yaml` or `examples/ollama-responses/config.yaml` for local OSS
+
+## Configuration Summary
+
+There are three separate configuration layers:
+
+1. Codex `config.toml`: tells Codex how to call the local shim
+2. shim `config.yaml`: tells the shim how to call the upstream provider
+3. shim `models.catalog`: tells the shim what model metadata to advertise back
+   to Codex through `/models`
+
+Keep these values aligned:
+
+- Codex `config.toml`: top-level `model`
+- shim `config.yaml`: `models.default`
+- shim `config.yaml`: at least one `models.catalog[*].slug`
+
+Important distinctions:
+
+- `profile_config` controls shim runtime behavior toward the upstream provider
+- `models.catalog` controls the model metadata Codex sees
+- `reasoning.enabled` is a runtime/default shim setting
+- `models.catalog[*].reasoning_levels` is a model capability declaration to Codex
+
+For the full walkthrough, field guide, and precedence rules, see
+[docs/configuration.md](/home/vivec/codex-shim/docs/configuration.md).
 
 ## Limitations
 

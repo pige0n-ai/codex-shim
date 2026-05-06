@@ -41,3 +41,5 @@ models:
 
 state:
   backend: memory
+logging:
+  level: info

@@ -11,5 +11,12 @@ provider:
     profile: vllm-chat
 reasoning:
   enabled: false
+models:
+  default: "your-vllm-model"
+  catalog:
+    - slug: "your-vllm-model"
+      context_window: 131072
 state:
   backend: memory
+logging:
+  level: info

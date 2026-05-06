@@ -1,8 +1,15 @@
 # ==============================================================================
-#  codex-shim — complete configuration reference (all keys with defaults)
+# codex-shim — configuration reference
 # ==============================================================================
-#  This file lists every supported config key and its default value.
-#  Use it as a reference; copy sections into your own config.yaml as needed.
+# This file enumerates every supported shim YAML key in one place.
+#
+# Notes:
+# - It is intentionally VALID, so a few values are example values rather than
+#   raw code defaults. In particular, models.catalog cannot be empty at runtime.
+# - This is shim config, not Codex config. Do NOT add a top-level "features"
+#   block here; the shim rejects it.
+# - Codex itself should be configured separately in $CODEX_HOME/config.toml.
+#   See examples/codex-config/config.toml for that side.
 # ==============================================================================
 
 server:
@@ -10,9 +17,11 @@ server:
   base_path: /v1
   cors:
     enabled: false
+    allow_origins: []
   auth:
     mode: optional-bearer
     accepted_bearer_tokens: []
+
 upstream:
   base_url: https://api.deepseek.com
   chat_path: /chat/completions
@@ -23,30 +32,160 @@ upstream:
   http_headers: {}
   env_http_headers: {}
   requires_openai_auth: false
+  # Command-based upstream auth refresh. Use this when the upstream token is
+  # fetched dynamically instead of coming from upstream.api_key_env.
+  #
+  # auth_command:
+  #   command: /usr/local/bin/fetch-upstream-token
+  #   args: ["--audience", "codex"]
+  #   timeout_ms: 5000
+  #   refresh_interval_ms: 300000
+  #   cwd: /path/to/project
   auth_command: null
   timeout_seconds: 900
   connect_timeout_seconds: 30
   max_retries: 2
+
 provider:
+  # Built-in shim profile preset. This controls how codex-shim talks to the
+  # upstream provider: chat shim, native Responses, or stateless Responses.
   kind: deepseek-chat
-  mode: ''
+
+  # Legacy no-op field retained only for backward compatibility.
+  mode: ""
+
   profile_config:
     profile: deepseek-chat
-    capabilities: null
-    extra_body: null
+
+    # Optional capability overrides layered on top of the selected profile.
+    capabilities:
+      # Endpoint mode:
+      #   native_responses | stateless_responses
+      # Any other value falls back to the chat shim path.
+      endpoint_mode: null
+
+      # Reasoning policy:
+      #   none
+      #   generic_reasoning_content
+      #   openai_responses_reasoning_item
+      #   deepseek_reasoning_content
+      #   sglang_reasoning_content
+      #   qwen_enable_thinking
+      #   openrouter_reasoning_details
+      reasoning_policy: null
+
+      # Tool policy:
+      #   no_tools | function_tools_only | native_responses_tools
+      tool_policy: null
+
+      # State policy:
+      #   adapter_stateful
+      #   upstream_previous_response_id
+      #   upstream_stateless_full_history
+      state_policy: null
+
+      supports_function_tools: null
+      supports_parallel_tool_calls: null
+      supports_structured_outputs: null
+      supports_json_object: null
+      supports_json_schema: null
+      supports_vision_input: null
+      supports_hosted_web_search: null
+      supports_hosted_file_search: null
+      supports_code_interpreter: null
+      supports_previous_response_id: null
+      supports_reasoning_effort: null
+      supports_usage_in_stream_final: null
+
+    # Provider-specific request body fields injected upstream.
+    extra_body:
+      chat_template_kwargs: null
+      enable_thinking: null
+      separate_reasoning: null
+      # Add arbitrary extra JSON fields here if a provider needs them.
+      # top_k: 50
+
 models:
+  # models.default is the shim's default model slug.
+  # Keep this in sync with:
+  #   - at least one models.catalog[*].slug below
+  #   - the top-level `model = "..."` in Codex's config.toml
   default: deepseek-v4-pro
-  map:
-    deepseek-v4-pro: deepseek-v4-pro
-    codex-default: deepseek-v4-pro
+  map: {}
+
+  # models.catalog is REQUIRED.
+  #
+  # It is the source of truth for codex-shim's /models response. The shim does
+  # not auto-discover model metadata from the upstream provider.
+  #
+  # At request time, codex-shim combines each entry here with the selected
+  # provider profile's capabilities to produce the final catalog seen by Codex.
   catalog:
     - slug: deepseek-v4-pro
+      display_name: DeepSeek V4 Pro
+      description: DeepSeek V4 Pro via codex-shim
       context_window: 131072
+
+      # If omitted, tool_calling defaults from the provider capability preset
+      # (supports_function_tools).
+      tool_calling: true
+
+      # If omitted, vision defaults from the provider capability preset
+      # (supports_vision_input).
+      vision: false
+
+      # reasoning_levels declares what Codex should believe this model supports.
+      # It does NOT track reasoning.enabled below automatically.
+      #
+      # If omitted:
+      #   - providers with supports_reasoning_effort=true default to ["high"]
+      #   - providers without reasoning effort support default to []
+      #
+      # If you want Codex to treat the model as non-reasoning, set [] explicitly.
+      reasoning_levels:
+        - high
+
+      # Cosmetic ordering in Codex model pickers.
+      priority: 10
+
+      # Optional system prompt prefix advertised in the model catalog.
+      # This is model metadata for Codex, not the same thing as runtime
+      # reasoning toggles or upstream provider request body fields.
+      base_instructions: ""
+
+      # Optional local compaction threshold advertised to Codex.
+      auto_compact_token_limit: null
+
+      # Whether Codex should consider hosted search available for this model.
+      # Only set true when the chosen shim profile and upstream provider can
+      # actually honor it.
+      supports_search_tool: false
+
+      # Whether the model should advertise support for reasoning summaries.
+      supports_reasoning_summaries: false
+
+      # Optional apply_patch tool type if you want Codex to expose patch editing
+      # through the model catalog.
+      apply_patch_tool_type: null
+
+      # Whether Codex may send image detail = "original".
+      supports_image_detail_original: false
+
 reasoning:
-  enabled: true
+  # Runtime/default behavior for how the shim talks to the upstream provider.
+  # This does NOT rewrite models.catalog[*].reasoning_levels automatically.
+  #
+  # Common pattern:
+  #   reasoning.enabled: false
+  #   models.catalog[*].reasoning_levels: [high]
+  #
+  # That means "this model supports reasoning, but the shim's default runtime
+  # behavior starts with reasoning disabled unless Codex requests it."
+  enabled: false
   effort: high
   expose_reasoning_to_client: false
   persist_reasoning_for_tool_calls: true
+
 state:
   backend: memory
   ttl_seconds: 86400
@@ -54,6 +193,7 @@ state:
   # Defaults to ~/.codex-shim/store.db on macOS/Linux and
   # %USERPROFILE%\.codex-shim\store.db on Windows when backend=sqlite.
   sqlite_path: null
+
 logging:
   level: info
   redact_api_keys: true

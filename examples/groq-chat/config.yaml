@@ -12,5 +12,13 @@ provider:
     profile: groq-chat
     capabilities:
       supports_parallel_tool_calls: false
+models:
+  # Replace both fields with a model available on your Groq account.
+  default: "your-groq-model"
+  catalog:
+    - slug: "your-groq-model"
+      context_window: 131072
 state:
   backend: memory
+logging:
+  level: info
