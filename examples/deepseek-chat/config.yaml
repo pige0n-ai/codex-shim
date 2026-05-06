@@ -42,7 +42,7 @@ provider:
 
 reasoning:
   enabled: true
-  effort: high          # deepseek effort mapping: minimal/low/medium → high, xhigh → max
+  effort: xhigh          # deepseek effort mapping: minimal/low/medium → high, xhigh → max
   expose_reasoning_to_client: false
   persist_reasoning_for_tool_calls: true
 
@@ -60,11 +60,12 @@ models:
     codex-default: "deepseek-v4-pro"
   catalog:
     - slug: "deepseek-v4-pro"
-      context_window: 131072
+      context_window: 1000000
       # If omitted, reasoning_levels would default from the provider capability
       # preset. DeepSeek supports reasoning effort, so the derived default would
       # be ["high"].
       reasoning_levels:
+        - xhigh
         - high
 
 state:

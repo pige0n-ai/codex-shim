@@ -32,14 +32,20 @@ web_search = "disabled"
 # model_reasoning_effort = "high"
 # model_verbosity = "medium"
 
+# Current Codex still loads custom model metadata from a startup catalog file.
+# Without this, custom models may fall back to generic metadata and fail to
+# appear in `/model`. `codex-shim install-codex-config` writes this for you.
+# model_catalog_json = "/absolute/path/to/$CODEX_HOME/codex-shim/model-catalog.json"
+
 [model_providers.codex_shim]
 name = "codex-shim"
 base_url = "http://127.0.0.1:8787/v1"
 
-# Codex uses this env var when calling the local shim.
-# The shim never forwards LOCAL_SHIM_TOKEN to the upstream provider.
-env_key = "LOCAL_SHIM_TOKEN"
-env_key_instructions = "Set LOCAL_SHIM_TOKEN before starting Codex."
+# Optional:
+# Add env_key only when the shim itself is protected by bearer auth, or when
+# you are routing Codex through a remote/shared shim gateway.
+# env_key = "LOCAL_SHIM_TOKEN"
+# env_key_instructions = "Set LOCAL_SHIM_TOKEN before starting Codex."
 
 # codex-shim always presents the Responses API to Codex, even when the upstream
 # provider only speaks /chat/completions internally.
@@ -58,10 +64,6 @@ supports_websockets = false
 # http_headers = { "X-Example" = "value" }
 # env_http_headers = { "X-Trace-Id" = "CODEX_SHIM_TRACE_ID" }
 # query_params = { tenant = "dev" }
-#
-# Optional offline model pin. Usually omit this for codex-shim, because the shim
-# already serves /models natively and that should be the source of truth:
-# model_catalog_json = "/absolute/path/to/model-catalog.json"
 
 # Alternative auth mode:
 # Use this instead of env_key when you want Codex itself to run a command that

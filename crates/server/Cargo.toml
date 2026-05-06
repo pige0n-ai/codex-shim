@@ -27,6 +27,7 @@ eventsource-stream.workspace = true
 tokio-util.workspace = true
 tokio-stream.workspace = true
 futures.workspace = true
+toml_edit = "0.22"
 rusqlite = { version = "0.33", features = ["bundled"], optional = true }
 
 [features]

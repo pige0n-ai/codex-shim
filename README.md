@@ -30,7 +30,8 @@ runners for each platform.
 ## Quick Start
 
 The intended path is: download a release archive, unpack it, start the shim
-with one bundled example config, then point Codex at `http://127.0.0.1:8787/v1`.
+with one bundled example config, then let `codex-shim` inject the matching
+Codex startup catalog and provider config for you.
 
 If you want the fastest post-download setup path, or a full explanation of how
 `profile_config`, `models.catalog`, and Codex's `config.toml` fit together, see
@@ -51,7 +52,7 @@ tar -xzf codex-shim-<version>-<target>.tar.gz
 cd codex-shim-<version>-<target>
 
 export DEEPSEEK_API_KEY="sk-..."
-export LOCAL_SHIM_TOKEN="local-shim-dev-token"
+./codex-shim install-codex-config --config examples/deepseek-chat/config.yaml
 ./codex-shim --config examples/deepseek-chat/config.yaml
 ```
 
@@ -62,14 +63,17 @@ Expand-Archive .\codex-shim-<version>-x86_64-pc-windows-msvc.zip
 cd .\codex-shim-<version>-x86_64-pc-windows-msvc
 
 $env:DEEPSEEK_API_KEY = "sk-..."
-$env:LOCAL_SHIM_TOKEN = "local-shim-dev-token"
+.\codex-shim.exe install-codex-config --config .\examples\deepseek-chat\config.yaml
 .\codex-shim.exe --config .\examples\deepseek-chat\config.yaml
 ```
 
-Then point Codex at the shim by adding the provider block from
-`examples/codex-config/config.toml` into `$CODEX_HOME/config.toml`.
-Set `model` there to the same slug used by your chosen shim YAML file.
-After that, use Codex normally:
+The install command writes:
+
+- `$CODEX_HOME/codex-shim/model-catalog.json`
+- `$CODEX_HOME/config.toml`
+- `$CODEX_HOME/config.toml.bak.0` ... `.bak.3` rolling backups when `config.toml` already exists
+
+After that, restart Codex and use it normally:
 
 ```bash
 codex
@@ -82,17 +86,26 @@ codex exec "Explain this repository"
 ```bash
 cargo build --release -p codex-shim
 export DEEPSEEK_API_KEY="sk-..."
-export LOCAL_SHIM_TOKEN="local-shim-dev-token"
+./target/release/codex-shim install-codex-config --config examples/deepseek-chat/config.yaml
 ./target/release/codex-shim --config examples/deepseek-chat/config.yaml
 ```
 
 ## Codex Provider Config
 
-In `$CODEX_HOME/config.toml`:
+The simplest path is not to edit this by hand. Run:
+
+```bash
+codex-shim install-codex-config --config ~/.codex-shim/config.yaml
+```
+
+That updates `$CODEX_HOME/config.toml` automatically.
+
+If you want to inspect or hand-edit the result, the important shape is:
 
 ```toml
 model_provider = "codex_shim"
 model = "deepseek-v4-pro"
+model_catalog_json = "/absolute/path/to/$CODEX_HOME/codex-shim/model-catalog.json"
 
 # Most shim profiles ultimately target Chat Completions upstreams, so hosted
 # web search should start disabled. If you use a native Responses provider that
@@ -103,8 +116,6 @@ web_search = "disabled"
 [model_providers.codex_shim]
 name = "codex-shim"
 base_url = "http://127.0.0.1:8787/v1"
-env_key = "LOCAL_SHIM_TOKEN"
-env_key_instructions = "Set LOCAL_SHIM_TOKEN before starting Codex."
 wire_api = "responses"        # explicit for clarity; this is also the default
 supports_websockets = false   # REQUIRED: codex-shim is HTTP/SSE only
 ```
@@ -123,9 +134,13 @@ supports_websockets = false   # REQUIRED: codex-shim is HTTP/SSE only
 >   correctly rejects.
 > - If your upstream is a native/stateless Responses provider that supports hosted
 >   search through the shim, you may change `web_search` to `cached` or `live`.
-> - The shim now serves its own `/models` catalog. `model_catalog_json` is
->   optional and best treated as an offline pin or manual override, not the
->   primary discovery path.
+> - Current Codex still loads startup metadata from top-level `model_catalog_json`.
+>   Without it, custom models may fall back to generic metadata and may not show up
+>   in `/model`, even though the shim serves `/v1/models` at runtime.
+> - `env_key` for Codex → shim auth is optional. For a local loopback server on
+>   `127.0.0.1`, the default installer omits it to reduce setup friction.
+> - Add `--env-key LOCAL_SHIM_TOKEN` only when you want Codex to authenticate to a
+>   remote/shared shim gateway or a loopback shim protected by bearer auth.
 > - Default Codex home is usually `~/.codex` on macOS/Linux and
 >   `%USERPROFILE%\\.codex` on Windows when `CODEX_HOME` is unset.
 
@@ -147,12 +162,14 @@ Codex-shim sits between Codex and your upstream provider — there are TWO
 separate authentication layers:
 
 1. **Codex → codex-shim**: The token Codex sends when calling your local
-   adapter. Set `env_key = "LOCAL_SHIM_TOKEN"` in your Codex provider config
-   and export it before starting Codex:
+   adapter. This is optional for a local loopback shim. Add it only when the
+   shim itself is protected by bearer auth or exposed as a remote gateway:
    ```bash
+   codex-shim install-codex-config --config ~/.codex-shim/config.yaml --env-key LOCAL_SHIM_TOKEN
    export LOCAL_SHIM_TOKEN="sk-any-value"
    ```
-   If `accepted_bearer_tokens` is empty in your shim config, any token passes.
+   If `accepted_bearer_tokens` is empty in your shim config, requests can pass
+   without any bearer token at all.
 
 2. **codex-shim → upstream provider**: Your actual API key for DeepSeek,
    OpenRouter, Ollama, etc. This is set via `upstream.api_key_env` in your
@@ -173,8 +190,8 @@ separate authentication layers:
        args: ["--audience", "codex"]
    ```
 
-These two tokens are independent. `LOCAL_SHIM_TOKEN` is never forwarded
-to upstream providers.
+These two tokens are independent. If you do use `LOCAL_SHIM_TOKEN`, it is never
+forwarded to upstream providers.
 
 ## Built-in Provider Profiles
 

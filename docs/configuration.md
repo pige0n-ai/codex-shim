@@ -75,23 +75,26 @@ models:
 Do not change `provider.profile_config.profile` unless you are deliberately
 switching to a different provider preset.
 
-### 4. Export the two auth variables
+### 4. Export the upstream API key
 
-You usually need one token for Codex calling the shim, and one key for the shim
-calling the upstream provider.
+For a local loopback shim, you usually only need the upstream provider key.
 
 macOS / Linux:
 
 ```bash
-export LOCAL_SHIM_TOKEN="local-shim-dev-token"
 export DEEPSEEK_API_KEY="sk-..."
 ```
 
 Windows PowerShell:
 
 ```powershell
-$env:LOCAL_SHIM_TOKEN = "local-shim-dev-token"
 $env:DEEPSEEK_API_KEY = "sk-..."
+```
+
+If you later decide to protect Codex → shim with bearer auth, reinstall with:
+
+```bash
+./codex-shim install-codex-config --config /absolute/path/to/config.yaml --env-key LOCAL_SHIM_TOKEN
 ```
 
 ### 5. Start the shim
@@ -113,26 +116,23 @@ The default config path is:
 - macOS / Linux: `~/.codex-shim/config.yaml`
 - Windows: `%USERPROFILE%\.codex-shim\config.yaml`
 
-### 6. Point Codex at the shim
+### 6. Install the matching Codex startup config
 
-Copy the provider block from
-[examples/codex-config/config.toml](/home/vivec/codex-shim/examples/codex-config/config.toml)
-into `$CODEX_HOME/config.toml`.
+Run:
 
-For a first setup, the key lines are:
-
-```toml
-model_provider = "codex_shim"
-model = "deepseek-v4-pro"
-
-[model_providers.codex_shim]
-base_url = "http://127.0.0.1:8787/v1"
-env_key = "LOCAL_SHIM_TOKEN"
-wire_api = "responses"
-supports_websockets = false
+```bash
+./codex-shim install-codex-config --config /absolute/path/to/config.yaml
 ```
 
-Keep this Codex `model` equal to the shim's `models.default`.
+That command writes:
+
+- `$CODEX_HOME/codex-shim/model-catalog.json`
+- `$CODEX_HOME/config.toml`
+- `$CODEX_HOME/config.toml.bak.0` ... `.bak.3` rolling backups when `config.toml` already exists
+
+For a first setup, keep the Codex `model` equal to the shim `models.default`.
+You only need `--model ...` when the same shim YAML advertises more than one
+catalog entry and you want a different default.
 
 ### 7. Run Codex
 
@@ -177,14 +177,15 @@ Typical fields:
 
 - `model_provider`
 - `model`
+- `model_catalog_json`
 - `web_search`
 - `model_providers.<id>.base_url`
-- `model_providers.<id>.env_key`
+- `model_providers.<id>.env_key` if you want Codex → shim bearer auth
 - `model_providers.<id>.wire_api`
 - `model_providers.<id>.supports_websockets`
 
 Use [examples/codex-config/config.toml](/home/vivec/codex-shim/examples/codex-config/config.toml)
-as the starting point.
+as the starting point, or let `codex-shim install-codex-config` write it.
 
 ### 2. Shim config: `config.yaml`
 
@@ -214,8 +215,10 @@ Use one of the files in `examples/<profile>/config.yaml` as the starting point.
 
 This lives inside the shim YAML, but it deserves to be thought of separately.
 
-It is the source of truth for the shim-native `/models` endpoint that Codex
-reads.
+It is the source of truth for the shim-native `/models` endpoint.
+Current Codex also needs a startup snapshot of that catalog through top-level
+`model_catalog_json` if you want correct custom-model metadata at startup and
+working `/model` picker entries.
 
 It answers:
 
@@ -372,41 +375,52 @@ explicitly in the catalog entry.
 
 ## Step 5. Configure Codex
 
-Point Codex at the local shim:
+The preferred path is:
+
+```bash
+codex-shim install-codex-config --config ~/.codex-shim/config.yaml
+```
+
+If you need to inspect the shape it writes, it looks like:
 
 ```toml
 model_provider = "codex_shim"
 model = "deepseek-v4-pro"
+model_catalog_json = "/absolute/path/to/$CODEX_HOME/codex-shim/model-catalog.json"
 web_search = "disabled"
 
 [model_providers.codex_shim]
 name = "codex-shim"
 base_url = "http://127.0.0.1:8787/v1"
-env_key = "LOCAL_SHIM_TOKEN"
 wire_api = "responses"
 supports_websockets = false
 ```
 
 This layer is only about Codex → shim.
 
+Add `env_key = "LOCAL_SHIM_TOKEN"` only when you want bearer auth on that hop.
+
 It does not replace the shim YAML.
 
 ## Step 6. Export credentials
 
-You typically need two independent environment variables:
+For a local loopback shim, you typically only need one environment variable:
 
-1. Codex → shim token
-2. shim → upstream API key
+1. shim → upstream API key
 
 Example:
 
 ```bash
-export LOCAL_SHIM_TOKEN="local-shim-dev-token"
 export DEEPSEEK_API_KEY="sk-..."
 ```
 
-The first is for Codex calling the local shim.
-The second is for the shim calling the upstream provider.
+If you do enable Codex → shim bearer auth, then add:
+
+```bash
+export LOCAL_SHIM_TOKEN="local-shim-dev-token"
+```
+
+That token is only for Codex calling the shim. It is never forwarded upstream.
 
 ## Step 7. Start the shim
 
@@ -508,8 +522,7 @@ For most users, the safest flow is:
    - `upstream.api_key_env`
    - `models.default`
    - `models.catalog[*].slug`
-3. copy the provider block from
-   [examples/codex-config/config.toml](/home/vivec/codex-shim/examples/codex-config/config.toml)
+3. run `codex-shim install-codex-config --config ~/.codex-shim/config.yaml`
 4. keep the Codex `model` equal to the shim `models.default`
 5. only touch `profile_config.capabilities` if you are intentionally overriding
    a built-in preset
