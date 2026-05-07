@@ -968,7 +968,10 @@ command = "/bin/true"
             .join("fixtures")
             .join("codex-home");
         let path = resolve_catalog_path(&codex_home, None).expect("default catalog path");
-        assert_eq!(path, codex_home.join("codex-shim").join("model-catalog.json"));
+        assert_eq!(
+            path,
+            codex_home.join("codex-shim").join("model-catalog.json")
+        );
     }
 
     #[test]
