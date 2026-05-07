@@ -963,12 +963,12 @@ command = "/bin/true"
 
     #[test]
     fn resolve_catalog_path_defaults_inside_codex_home() {
-        let path = resolve_catalog_path(Path::new("/home/tester/.codex"), None)
-            .expect("default catalog path");
-        assert_eq!(
-            path,
-            Path::new("/home/tester/.codex/codex-shim/model-catalog.json")
-        );
+        let codex_home = std::env::current_dir()
+            .expect("current dir")
+            .join("fixtures")
+            .join("codex-home");
+        let path = resolve_catalog_path(&codex_home, None).expect("default catalog path");
+        assert_eq!(path, codex_home.join("codex-shim").join("model-catalog.json"));
     }
 
     #[test]
