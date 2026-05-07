@@ -90,6 +90,12 @@ enum Commands {
         /// Codex home directory. Defaults to $CODEX_HOME or ~/.codex.
         #[arg(long)]
         codex_home: Option<String>,
+        /// Project directory for Codex desktop project-scoped config.
+        #[arg(long)]
+        project_dir: Option<String>,
+        /// Mark the project as trusted in the global Codex config.
+        #[arg(long)]
+        trust_project: bool,
         /// Path to the startup model catalog JSON. Relative paths are resolved inside CODEX_HOME.
         #[arg(long)]
         catalog_path: Option<String>,
@@ -120,6 +126,30 @@ enum Commands {
         #[arg(long)]
         api_key_env: Option<String>,
     },
+    /// Validate desktop-oriented Codex project wiring without mutating config files
+    Doctor {
+        #[command(subcommand)]
+        command: DoctorCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum DoctorCommands {
+    /// Validate project-scoped Codex desktop config and trust wiring
+    Desktop {
+        /// Project directory that should contain .codex/config.toml
+        #[arg(long)]
+        project_dir: String,
+        /// Codex home directory. Defaults to $CODEX_HOME or ~/.codex.
+        #[arg(long)]
+        codex_home: Option<String>,
+        /// Provider profile override for catalog rendering.
+        #[arg(long)]
+        profile: Option<String>,
+        /// Expected project provider ID.
+        #[arg(long, default_value = "codex_shim")]
+        provider_id: String,
+    },
 }
 
 // ── main ─────────────────────────────────────────────────────────
@@ -149,6 +179,8 @@ async fn main() -> anyhow::Result<()> {
             profile,
             provider_id,
             codex_home,
+            project_dir,
+            trust_project,
             catalog_path,
             base_url,
             env_key,
@@ -159,6 +191,8 @@ async fn main() -> anyhow::Result<()> {
             profile.as_deref(),
             &provider_id,
             codex_home.as_deref(),
+            project_dir.as_deref(),
+            trust_project,
             catalog_path.as_deref(),
             &base_url,
             env_key.as_deref(),
@@ -170,6 +204,20 @@ async fn main() -> anyhow::Result<()> {
             base_url,
             api_key_env,
         }) => cmd_probe(&base_url, api_key_env.as_deref()).await,
+        Some(Commands::Doctor { command }) => match command {
+            DoctorCommands::Desktop {
+                project_dir,
+                codex_home,
+                profile,
+                provider_id,
+            } => cmd_doctor_desktop(
+                cli.config.as_deref(),
+                &project_dir,
+                codex_home.as_deref(),
+                profile.as_deref(),
+                &provider_id,
+            ),
+        },
         None => run_server(&cli).await,
     }
 }
@@ -276,11 +324,17 @@ fn cmd_install_codex_config(
     profile: Option<&str>,
     provider_id: &str,
     codex_home: Option<&str>,
+    project_dir: Option<&str>,
+    trust_project: bool,
     catalog_path: Option<&str>,
     base_url: &str,
     env_key: Option<&str>,
     web_search: Option<&str>,
 ) -> anyhow::Result<()> {
+    if trust_project && project_dir.is_none() {
+        bail!("--trust-project requires --project-dir");
+    }
+
     let config = Config::load(config_path).with_context(|| {
         if let Some(path) = config_path {
             format!("failed to load shim config from {}", path)
@@ -313,6 +367,89 @@ fn cmd_install_codex_config(
         None => configured_profile_caps(&config),
     };
     let catalog = build_model_catalog(&config.models.catalog, &caps);
+    let effective_web_search =
+        resolve_install_web_search_mode(web_search, &caps, &config.models.catalog)?;
+
+    if let Some(project_dir) = project_dir {
+        if provider_id != "codex_shim" {
+            bail!(
+                "desktop project installs require provider_id 'codex_shim' to keep resume/history stable"
+            );
+        }
+        if catalog_path.is_some() {
+            bail!(
+                "--catalog-path is not supported with --project-dir; desktop installs use a stable in-project catalog path"
+            );
+        }
+
+        let project_dir = resolve_project_dir(project_dir)?;
+        let project_config_path = project_config_path(&project_dir);
+        let project_catalog_path = project_catalog_path(&project_dir)?;
+        if let Some(parent) = project_catalog_path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create project model catalog directory at {}",
+                    parent.display()
+                )
+            })?;
+        }
+
+        write_catalog_json(&project_catalog_path, &catalog)?;
+        update_codex_config_toml(
+            &project_config_path,
+            provider_id,
+            target_model,
+            &project_catalog_path,
+            base_url,
+            env_key,
+            effective_web_search,
+        )?;
+
+        let mut trusted = false;
+        let mut global_config_path = None;
+        if trust_project {
+            let codex_home = resolve_codex_home(codex_home)?;
+            std::fs::create_dir_all(&codex_home).with_context(|| {
+                format!("failed to create CODEX_HOME at {}", codex_home.display())
+            })?;
+            let path = codex_home.join("config.toml");
+            update_project_trust_entry(&path, &project_dir)?;
+            trusted = true;
+            global_config_path = Some(path);
+        }
+
+        println!(
+            "Wrote project model catalog: {}",
+            project_catalog_path.display()
+        );
+        println!(
+            "Updated project Codex config: {}",
+            project_config_path.display()
+        );
+        println!(
+            "Activated provider '{}' with model '{}' for desktop project '{}'.",
+            provider_id,
+            target_model,
+            project_dir.display()
+        );
+        if let Some(path) = global_config_path {
+            println!(
+                "Marked project as trusted in global Codex config: {}",
+                path.display()
+            );
+        } else {
+            println!(
+                "Desktop only reads project .codex/config.toml after the project is trusted. Re-run with --trust-project or trust it manually."
+            );
+        }
+        println!("Restart Codex desktop to pick up the new project catalog.");
+        if !trusted {
+            println!(
+                "History/resume is only guaranteed for shim-managed threads opened from this trusted project config."
+            );
+        }
+        return Ok(());
+    }
 
     let codex_home = resolve_codex_home(codex_home)?;
     std::fs::create_dir_all(&codex_home)
@@ -337,7 +474,7 @@ fn cmd_install_codex_config(
         &catalog_path,
         base_url,
         env_key,
-        web_search,
+        effective_web_search,
     )?;
 
     println!("Wrote model catalog: {}", catalog_path.display());
@@ -347,6 +484,43 @@ fn cmd_install_codex_config(
         provider_id, target_model
     );
     println!("Restart Codex to pick up the new startup catalog.");
+    Ok(())
+}
+
+fn cmd_doctor_desktop(
+    config_path: Option<&str>,
+    project_dir: &str,
+    codex_home: Option<&str>,
+    profile: Option<&str>,
+    provider_id: &str,
+) -> anyhow::Result<()> {
+    let config = Config::load(config_path).with_context(|| {
+        if let Some(path) = config_path {
+            format!("failed to load shim config from {}", path)
+        } else {
+            "failed to load shim config from --config or the default ~/.codex-shim/config.yaml"
+                .to_string()
+        }
+    })?;
+    config.validate().with_context(|| {
+        "shim config is not ready for desktop validation; fix models.catalog in config.yaml first"
+    })?;
+
+    let caps = match profile {
+        Some(profile) => explicit_profile_caps(profile)?,
+        None => configured_profile_caps(&config),
+    };
+    let report = build_desktop_doctor_report(
+        &config,
+        &caps,
+        &resolve_project_dir(project_dir)?,
+        codex_home,
+        provider_id,
+    )?;
+    report.print();
+    if report.has_unsupported() {
+        bail!("desktop doctor found unsupported configuration issues");
+    }
     Ok(())
 }
 
@@ -536,6 +710,54 @@ async fn cmd_probe(base_url: &str, api_key_env: Option<&str>) -> anyhow::Result<
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DesktopCheckStatus {
+    Supported,
+    Gated,
+    Unsupported,
+}
+
+impl DesktopCheckStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Supported => "supported",
+            Self::Gated => "gated",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DesktopCheck {
+    status: DesktopCheckStatus,
+    subject: &'static str,
+    detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DesktopDoctorReport {
+    checks: Vec<DesktopCheck>,
+}
+
+impl DesktopDoctorReport {
+    fn has_unsupported(&self) -> bool {
+        self.checks
+            .iter()
+            .any(|check| check.status == DesktopCheckStatus::Unsupported)
+    }
+
+    fn print(&self) {
+        for check in &self.checks {
+            println!(
+                "[{}] {}: {}",
+                check.status.label(),
+                check.subject,
+                check.detail
+            );
+        }
+    }
+}
+
 // ── helpers ──────────────────────────────────────────────────────
 
 fn configured_profile_caps(config: &Config) -> ProviderCapabilities {
@@ -562,6 +784,61 @@ fn explicit_profile_caps(profile: &str) -> anyhow::Result<ProviderCapabilities> 
     Ok(providers::create_profile(profile, None)
         .capabilities()
         .clone())
+}
+
+fn resolve_install_web_search_mode<'a>(
+    requested: Option<&'a str>,
+    caps: &ProviderCapabilities,
+    catalog: &[CatalogModelSpec],
+) -> anyhow::Result<Option<&'a str>> {
+    match requested {
+        Some(mode @ ("disabled" | "cached" | "live")) => {
+            if mode != "disabled" && !catalog_supports_web_search(caps, catalog) {
+                bail!(
+                    "web_search mode '{}' requires a Responses-capable profile with hosted web search enabled and every advertised catalog model to set supports_search_tool = true",
+                    mode
+                );
+            }
+            Ok(Some(mode))
+        }
+        Some(other) => bail!(
+            "invalid web_search mode '{}'; expected one of: disabled, cached, live",
+            other
+        ),
+        None if catalog_supports_web_search(caps, catalog) => Ok(None),
+        None => Ok(Some("disabled")),
+    }
+}
+
+fn catalog_supports_web_search(caps: &ProviderCapabilities, catalog: &[CatalogModelSpec]) -> bool {
+    caps.supports_hosted_web_search
+        && !catalog.is_empty()
+        && catalog
+            .iter()
+            .all(|spec| spec.supports_search_tool.unwrap_or(false))
+}
+
+fn resolve_project_dir(project_dir: &str) -> anyhow::Result<PathBuf> {
+    let path = absolutize(&expand_tilde(project_dir))?;
+    let metadata = std::fs::metadata(&path)
+        .with_context(|| format!("failed to read project directory {}", path.display()))?;
+    if !metadata.is_dir() {
+        bail!("project path '{}' is not a directory", path.display());
+    }
+    Ok(path)
+}
+
+fn project_config_path(project_dir: &Path) -> PathBuf {
+    project_dir.join(".codex").join("config.toml")
+}
+
+fn project_catalog_path(project_dir: &Path) -> anyhow::Result<PathBuf> {
+    absolutize(
+        &project_dir
+            .join(".codex")
+            .join("codex-shim")
+            .join("model-catalog.json"),
+    )
 }
 
 fn resolve_codex_home(codex_home: Option<&str>) -> anyhow::Result<PathBuf> {
@@ -607,6 +884,325 @@ fn write_catalog_json(path: &Path, catalog: &ModelsResponse) -> anyhow::Result<(
         .with_context(|| format!("failed to write model catalog to {}", path.display()))
 }
 
+fn update_project_trust_entry(global_config_path: &Path, project_dir: &Path) -> anyhow::Result<()> {
+    let (existing, mut doc) = read_toml_document(global_config_path)?;
+    let projects = ensure_table(doc.as_table_mut(), "projects", "projects")?;
+    let project_key = project_dir.to_string_lossy();
+    let entry = ensure_table(projects, project_key.as_ref(), "projects.<path>")?;
+    entry["trust_level"] = value("trusted");
+    write_toml_document(global_config_path, existing.as_deref(), &doc)?;
+    Ok(())
+}
+
+fn build_desktop_doctor_report(
+    config: &Config,
+    caps: &ProviderCapabilities,
+    project_dir: &Path,
+    codex_home: Option<&str>,
+    provider_id: &str,
+) -> anyhow::Result<DesktopDoctorReport> {
+    let mut checks = Vec::new();
+    let project_config = project_config_path(project_dir);
+    let expected_catalog_path = project_catalog_path(project_dir)?;
+    let expected_catalog = build_model_catalog(&config.models.catalog, caps);
+    let expected_search_support = catalog_supports_web_search(caps, &config.models.catalog);
+
+    if provider_id != "codex_shim" {
+        checks.push(DesktopCheck {
+            status: DesktopCheckStatus::Unsupported,
+            subject: "provider_id",
+            detail: format!(
+                "desktop project support requires provider_id 'codex_shim'; got '{}'",
+                provider_id
+            ),
+        });
+    } else {
+        checks.push(DesktopCheck {
+            status: DesktopCheckStatus::Supported,
+            subject: "provider_id",
+            detail: "desktop project installs keep a stable provider identity for shim-managed history/resume".to_string(),
+        });
+    }
+
+    if project_config.exists() {
+        checks.push(DesktopCheck {
+            status: DesktopCheckStatus::Supported,
+            subject: "project_config",
+            detail: format!("found project config at {}", project_config.display()),
+        });
+
+        let project_toml = std::fs::read_to_string(&project_config)
+            .with_context(|| format!("failed to read {}", project_config.display()))?;
+        let project_doc = project_toml
+            .parse::<DocumentMut>()
+            .with_context(|| format!("failed to parse {}", project_config.display()))?;
+
+        let actual_provider = project_doc["model_provider"].as_str();
+        if actual_provider == Some(provider_id) {
+            checks.push(DesktopCheck {
+                status: DesktopCheckStatus::Supported,
+                subject: "project_model_provider",
+                detail: format!("project config uses stable provider '{}'", provider_id),
+            });
+        } else {
+            checks.push(DesktopCheck {
+                status: DesktopCheckStatus::Unsupported,
+                subject: "project_model_provider",
+                detail: format!(
+                    "project config model_provider is {:?}; expected '{}'",
+                    actual_provider, provider_id
+                ),
+            });
+        }
+
+        let active_model = project_doc["model"].as_str();
+        match active_model {
+            Some(model) if config.models.catalog.iter().any(|spec| spec.slug == model) => {
+                checks.push(DesktopCheck {
+                    status: DesktopCheckStatus::Supported,
+                    subject: "project_model",
+                    detail: format!(
+                        "active project model '{}' is present in shim models.catalog",
+                        model
+                    ),
+                });
+            }
+            Some(model) => checks.push(DesktopCheck {
+                status: DesktopCheckStatus::Unsupported,
+                subject: "project_model",
+                detail: format!(
+                    "project config model '{}' is not present in shim models.catalog",
+                    model
+                ),
+            }),
+            None => checks.push(DesktopCheck {
+                status: DesktopCheckStatus::Unsupported,
+                subject: "project_model",
+                detail: "project config is missing top-level model".to_string(),
+            }),
+        }
+
+        let actual_catalog = project_doc["model_catalog_json"].as_str();
+        if actual_catalog == Some(expected_catalog_path.to_string_lossy().as_ref()) {
+            checks.push(DesktopCheck {
+                status: DesktopCheckStatus::Supported,
+                subject: "project_model_catalog_path",
+                detail: format!(
+                    "project config points at stable in-project catalog {}",
+                    expected_catalog_path.display()
+                ),
+            });
+        } else {
+            checks.push(DesktopCheck {
+                status: DesktopCheckStatus::Unsupported,
+                subject: "project_model_catalog_path",
+                detail: format!(
+                    "project config model_catalog_json is {:?}; expected {}",
+                    actual_catalog,
+                    expected_catalog_path.display()
+                ),
+            });
+        }
+
+        let provider = &project_doc["model_providers"][provider_id];
+        if provider.is_none() {
+            checks.push(DesktopCheck {
+                status: DesktopCheckStatus::Unsupported,
+                subject: "project_provider_block",
+                detail: format!(
+                    "missing [model_providers.{}] block in project config",
+                    provider_id
+                ),
+            });
+        } else {
+            let wire_api = provider["wire_api"].as_str();
+            if wire_api == Some("responses") {
+                checks.push(DesktopCheck {
+                    status: DesktopCheckStatus::Supported,
+                    subject: "wire_api",
+                    detail: "project provider uses wire_api = \"responses\"".to_string(),
+                });
+            } else {
+                checks.push(DesktopCheck {
+                    status: DesktopCheckStatus::Unsupported,
+                    subject: "wire_api",
+                    detail: format!(
+                        "project provider wire_api is {:?}; expected \"responses\"",
+                        wire_api
+                    ),
+                });
+            }
+
+            let supports_websockets = provider["supports_websockets"].as_bool();
+            if supports_websockets == Some(false) {
+                checks.push(DesktopCheck {
+                    status: DesktopCheckStatus::Supported,
+                    subject: "supports_websockets",
+                    detail: "project provider keeps supports_websockets = false".to_string(),
+                });
+            } else {
+                checks.push(DesktopCheck {
+                    status: DesktopCheckStatus::Unsupported,
+                    subject: "supports_websockets",
+                    detail: format!(
+                        "project provider supports_websockets is {:?}; expected false",
+                        supports_websockets
+                    ),
+                });
+            }
+        }
+
+        let web_search = project_doc["web_search"].as_str();
+        match web_search {
+            Some("disabled") => checks.push(DesktopCheck {
+                status: DesktopCheckStatus::Supported,
+                subject: "web_search",
+                detail: "top-level web_search is disabled".to_string(),
+            }),
+            Some(mode @ ("cached" | "live")) if expected_search_support => {
+                checks.push(DesktopCheck {
+                    status: DesktopCheckStatus::Supported,
+                    subject: "web_search",
+                    detail: format!(
+                        "top-level web_search = '{}' is consistent with the shim profile and catalog",
+                        mode
+                    ),
+                });
+            }
+            Some(mode @ ("cached" | "live")) => checks.push(DesktopCheck {
+                status: DesktopCheckStatus::Unsupported,
+                subject: "web_search",
+                detail: format!(
+                    "top-level web_search = '{}' but the active shim profile/catalog does not advertise hosted web search for every model",
+                    mode
+                ),
+            }),
+            Some(other) => checks.push(DesktopCheck {
+                status: DesktopCheckStatus::Unsupported,
+                subject: "web_search",
+                detail: format!(
+                    "top-level web_search = '{}' is invalid; expected disabled, cached, or live",
+                    other
+                ),
+            }),
+            None => checks.push(DesktopCheck {
+                status: DesktopCheckStatus::Unsupported,
+                subject: "web_search",
+                detail: "project config is missing top-level web_search".to_string(),
+            }),
+        }
+    } else {
+        checks.push(DesktopCheck {
+            status: DesktopCheckStatus::Unsupported,
+            subject: "project_config",
+            detail: format!(
+                "missing project config {}; run 'codex-shim install-codex-config --project-dir {}'",
+                project_config.display(),
+                project_dir.display()
+            ),
+        });
+    }
+
+    if expected_catalog_path.exists() {
+        let actual_catalog =
+            std::fs::read_to_string(&expected_catalog_path).with_context(|| {
+                format!(
+                    "failed to read project catalog {}",
+                    expected_catalog_path.display()
+                )
+            })?;
+        let actual_catalog: ModelsResponse =
+            serde_json::from_str(&actual_catalog).with_context(|| {
+                format!(
+                    "failed to parse project catalog {}",
+                    expected_catalog_path.display()
+                )
+            })?;
+        if actual_catalog == expected_catalog {
+            checks.push(DesktopCheck {
+                status: DesktopCheckStatus::Supported,
+                subject: "project_catalog",
+                detail: "project catalog matches the current shim config and provider profile"
+                    .to_string(),
+            });
+        } else {
+            checks.push(DesktopCheck {
+                status: DesktopCheckStatus::Unsupported,
+                subject: "project_catalog",
+                detail: "project catalog differs from the current shim config or provider profile"
+                    .to_string(),
+            });
+        }
+    } else {
+        checks.push(DesktopCheck {
+            status: DesktopCheckStatus::Unsupported,
+            subject: "project_catalog",
+            detail: format!(
+                "missing project catalog {}",
+                expected_catalog_path.display()
+            ),
+        });
+    }
+
+    match resolve_codex_home(codex_home) {
+        Ok(codex_home) => {
+            let global_config = codex_home.join("config.toml");
+            if global_config.exists() {
+                let global_toml = std::fs::read_to_string(&global_config)
+                    .with_context(|| format!("failed to read {}", global_config.display()))?;
+                let global_doc = global_toml
+                    .parse::<DocumentMut>()
+                    .with_context(|| format!("failed to parse {}", global_config.display()))?;
+                let trust_level =
+                    global_doc["projects"][project_dir.to_string_lossy().as_ref()]["trust_level"]
+                        .as_str();
+                if trust_level == Some("trusted") {
+                    checks.push(DesktopCheck {
+                        status: DesktopCheckStatus::Supported,
+                        subject: "project_trust",
+                        detail: format!(
+                            "global Codex config trusts project '{}'",
+                            project_dir.display()
+                        ),
+                    });
+                } else {
+                    checks.push(DesktopCheck {
+                        status: DesktopCheckStatus::Unsupported,
+                        subject: "project_trust",
+                        detail: format!(
+                            "global Codex config does not mark '{}' as trusted; run install-codex-config --project-dir '{}' --trust-project",
+                            project_dir.display(),
+                            project_dir.display()
+                        ),
+                    });
+                }
+            } else {
+                checks.push(DesktopCheck {
+                    status: DesktopCheckStatus::Unsupported,
+                    subject: "project_trust",
+                    detail: format!(
+                        "missing global Codex config {}; desktop cannot trust project-scoped config without it",
+                        global_config.display()
+                    ),
+                });
+            }
+        }
+        Err(err) => checks.push(DesktopCheck {
+            status: DesktopCheckStatus::Unsupported,
+            subject: "project_trust",
+            detail: format!("could not resolve CODEX_HOME for trust validation: {err}"),
+        }),
+    }
+
+    checks.push(DesktopCheck {
+        status: DesktopCheckStatus::Gated,
+        subject: "legacy_non_shim_threads",
+        detail: "old non-shim desktop threads may still fail to resume with their original provider context; this depends on Codex desktop thread restoration behavior rather than codex-shim".to_string(),
+    });
+
+    Ok(DesktopDoctorReport { checks })
+}
+
 fn update_codex_config_toml(
     path: &Path,
     provider_id: &str,
@@ -616,21 +1212,7 @@ fn update_codex_config_toml(
     env_key: Option<&str>,
     web_search: Option<&str>,
 ) -> anyhow::Result<()> {
-    let existing = match std::fs::read_to_string(path) {
-        Ok(content) => Some(content),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-        Err(err) => return Err(err).with_context(|| format!("failed to read {}", path.display())),
-    };
-
-    let mut doc = if existing.as_deref().unwrap_or_default().trim().is_empty() {
-        DocumentMut::new()
-    } else {
-        existing
-            .as_deref()
-            .unwrap_or_default()
-            .parse::<DocumentMut>()
-            .with_context(|| format!("failed to parse {}", path.display()))?
-    };
+    let (existing, mut doc) = read_toml_document(path)?;
 
     merge_codex_config_document(
         &mut doc,
@@ -641,16 +1223,58 @@ fn update_codex_config_toml(
         env_key,
         web_search,
     )?;
+    write_toml_document(path, existing.as_deref(), &doc)?;
+    Ok(())
+}
+
+fn read_toml_document(path: &Path) -> anyhow::Result<(Option<String>, DocumentMut)> {
+    let existing = match std::fs::read_to_string(path) {
+        Ok(content) => Some(content),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => return Err(err).with_context(|| format!("failed to read {}", path.display())),
+    };
+
+    let doc = if existing.as_deref().unwrap_or_default().trim().is_empty() {
+        DocumentMut::new()
+    } else {
+        existing
+            .as_deref()
+            .unwrap_or_default()
+            .parse::<DocumentMut>()
+            .with_context(|| format!("failed to parse {}", path.display()))?
+    };
+    Ok((existing, doc))
+}
+
+fn write_toml_document(
+    path: &Path,
+    existing: Option<&str>,
+    doc: &DocumentMut,
+) -> anyhow::Result<bool> {
+    let rendered = normalize_toml(doc.to_string());
+    if existing
+        .map(|content| normalize_toml(content.to_string()) == rendered)
+        .unwrap_or(false)
+    {
+        return Ok(false);
+    }
 
     if existing.is_some() {
         rotate_config_backups(path)?;
+    } else if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create config directory {}", parent.display()))?;
     }
+    std::fs::write(path, rendered)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(true)
+}
 
-    let mut rendered = doc.to_string();
+fn normalize_toml(mut rendered: String) -> String {
     if !rendered.ends_with('\n') {
         rendered.push('\n');
     }
-    std::fs::write(path, rendered).with_context(|| format!("failed to write {}", path.display()))
+    rendered
 }
 
 fn merge_codex_config_document(
@@ -832,6 +1456,100 @@ fn check_config_permissions(path: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "codex-shim-{label}-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn sample_catalog_spec(supports_search_tool: bool) -> CatalogModelSpec {
+        CatalogModelSpec {
+            slug: "mock-model".into(),
+            display_name: Some("mock-model".into()),
+            description: None,
+            context_window: 131072,
+            tool_calling: Some(true),
+            vision: Some(false),
+            reasoning_levels: Some(vec!["high".into()]),
+            priority: Some(10),
+            base_instructions: Some(String::new()),
+            auto_compact_token_limit: None,
+            supports_search_tool: Some(supports_search_tool),
+            supports_reasoning_summaries: Some(false),
+            apply_patch_tool_type: None,
+            supports_image_detail_original: Some(false),
+        }
+    }
+
+    fn sample_config(provider_kind: &str, supports_search_tool: bool) -> Config {
+        let mut config = Config::default();
+        config.provider.kind = provider_kind.into();
+        config.models.default = "mock-model".into();
+        config.models.catalog = vec![sample_catalog_spec(supports_search_tool)];
+        config
+    }
+
+    fn write_test_shim_config(
+        dir: &Path,
+        provider_kind: &str,
+        supports_search_tool: bool,
+    ) -> PathBuf {
+        let path = dir.join("config.yaml");
+        let supports_search_tool = if supports_search_tool {
+            "true"
+        } else {
+            "false"
+        };
+        let yaml = format!(
+            r#"
+server:
+  listen: "127.0.0.1:8787"
+  base_path: "/v1"
+upstream:
+  base_url: "https://api.example.com"
+  api_key_env: "EXAMPLE_API_KEY"
+provider:
+  kind: "{provider_kind}"
+models:
+  default: "mock-model"
+  catalog:
+    - slug: "mock-model"
+      display_name: "mock-model"
+      context_window: 131072
+      tool_calling: true
+      vision: false
+      reasoning_levels: ["high"]
+      supports_search_tool: {supports_search_tool}
+state:
+  backend: "memory"
+logging:
+  level: "info"
+"#
+        );
+        std::fs::write(&path, yaml.trim()).expect("write shim config");
+        path
+    }
+
+    fn doctor_report_subject<'a>(
+        report: &'a DesktopDoctorReport,
+        subject: &str,
+    ) -> &'a DesktopCheck {
+        report
+            .checks
+            .iter()
+            .find(|check| check.subject == subject)
+            .expect("missing doctor check")
+    }
 
     #[test]
     fn merge_codex_config_writes_top_level_catalog_pointer() {
@@ -999,6 +1717,253 @@ command = "/bin/true"
                 .as_table()
                 .is_some_and(|table| !table.contains_key("env_key_instructions"))
         );
+    }
+
+    #[test]
+    fn install_project_mode_writes_project_config_and_trust() {
+        let root = unique_temp_dir("project-install");
+        let project_dir = root.join("repo");
+        let codex_home = root.join("codex-home");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        std::fs::create_dir_all(&codex_home).expect("create codex home");
+        let shim_config = write_test_shim_config(&root, "deepseek-chat", false);
+
+        cmd_install_codex_config(
+            Some(shim_config.to_string_lossy().as_ref()),
+            None,
+            None,
+            "codex_shim",
+            Some(codex_home.to_string_lossy().as_ref()),
+            Some(project_dir.to_string_lossy().as_ref()),
+            true,
+            None,
+            "http://127.0.0.1:8787/v1",
+            Some("LOCAL_SHIM_TOKEN"),
+            None,
+        )
+        .expect("project install");
+
+        let project_config = project_config_path(&project_dir);
+        let project_catalog = project_catalog_path(&project_dir).expect("project catalog path");
+        assert!(project_config.exists(), "project config should exist");
+        assert!(project_catalog.exists(), "project catalog should exist");
+
+        let project_doc = std::fs::read_to_string(&project_config)
+            .expect("read project config")
+            .parse::<DocumentMut>()
+            .expect("parse project config");
+        assert_eq!(project_doc["model_provider"].as_str(), Some("codex_shim"));
+        assert_eq!(
+            project_doc["model_catalog_json"].as_str(),
+            Some(project_catalog.to_string_lossy().as_ref())
+        );
+        assert_eq!(project_doc["web_search"].as_str(), Some("disabled"));
+        assert_eq!(
+            project_doc["model_providers"]["codex_shim"]["wire_api"].as_str(),
+            Some("responses")
+        );
+        assert_eq!(
+            project_doc["model_providers"]["codex_shim"]["supports_websockets"].as_bool(),
+            Some(false)
+        );
+
+        let global_doc = std::fs::read_to_string(codex_home.join("config.toml"))
+            .expect("read global config")
+            .parse::<DocumentMut>()
+            .expect("parse global config");
+        assert_eq!(
+            global_doc["projects"][project_dir.to_string_lossy().as_ref()]["trust_level"].as_str(),
+            Some("trusted")
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn install_project_mode_is_idempotent_and_keeps_stable_paths() {
+        let root = unique_temp_dir("project-idempotent");
+        let project_dir = root.join("repo");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let shim_config = write_test_shim_config(&root, "deepseek-chat", false);
+
+        cmd_install_codex_config(
+            Some(shim_config.to_string_lossy().as_ref()),
+            None,
+            None,
+            "codex_shim",
+            None,
+            Some(project_dir.to_string_lossy().as_ref()),
+            false,
+            None,
+            "http://127.0.0.1:8787/v1",
+            None,
+            None,
+        )
+        .expect("first install");
+        cmd_install_codex_config(
+            Some(shim_config.to_string_lossy().as_ref()),
+            None,
+            None,
+            "codex_shim",
+            None,
+            Some(project_dir.to_string_lossy().as_ref()),
+            false,
+            None,
+            "http://127.0.0.1:8787/v1",
+            None,
+            None,
+        )
+        .expect("second install");
+
+        let project_config = project_config_path(&project_dir);
+        let project_doc = std::fs::read_to_string(&project_config)
+            .expect("read project config")
+            .parse::<DocumentMut>()
+            .expect("parse project config");
+        assert_eq!(project_doc["model_provider"].as_str(), Some("codex_shim"));
+        assert_eq!(
+            project_doc["model_catalog_json"].as_str(),
+            Some(
+                project_catalog_path(&project_dir)
+                    .expect("project catalog path")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        assert!(
+            !backup_path(&project_config, 0).exists(),
+            "idempotent rerun should not rotate backups"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn install_project_mode_rejects_non_default_provider_id() {
+        let root = unique_temp_dir("project-provider-id");
+        let project_dir = root.join("repo");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let shim_config = write_test_shim_config(&root, "deepseek-chat", false);
+
+        let err = cmd_install_codex_config(
+            Some(shim_config.to_string_lossy().as_ref()),
+            None,
+            None,
+            "custom_provider",
+            None,
+            Some(project_dir.to_string_lossy().as_ref()),
+            false,
+            None,
+            "http://127.0.0.1:8787/v1",
+            None,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("provider_id 'codex_shim'"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_install_web_search_mode_rejects_unsupported_live() {
+        let config = sample_config("deepseek-chat", false);
+        let caps = configured_profile_caps(&config);
+        let err = resolve_install_web_search_mode(Some("live"), &caps, &config.models.catalog)
+            .unwrap_err();
+        assert!(err.to_string().contains("hosted web search"));
+    }
+
+    #[test]
+    fn desktop_doctor_reports_supported_project_install() {
+        let root = unique_temp_dir("desktop-doctor-supported");
+        let project_dir = root.join("repo");
+        let codex_home = root.join("codex-home");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        std::fs::create_dir_all(&codex_home).expect("create codex home");
+        let shim_config = write_test_shim_config(&root, "deepseek-chat", false);
+
+        cmd_install_codex_config(
+            Some(shim_config.to_string_lossy().as_ref()),
+            None,
+            None,
+            "codex_shim",
+            Some(codex_home.to_string_lossy().as_ref()),
+            Some(project_dir.to_string_lossy().as_ref()),
+            true,
+            None,
+            "http://127.0.0.1:8787/v1",
+            None,
+            None,
+        )
+        .expect("project install");
+
+        let config = sample_config("deepseek-chat", false);
+        let caps = configured_profile_caps(&config);
+        let report = build_desktop_doctor_report(
+            &config,
+            &caps,
+            &project_dir,
+            Some(codex_home.to_string_lossy().as_ref()),
+            "codex_shim",
+        )
+        .expect("doctor report");
+
+        assert!(!report.has_unsupported(), "report: {:?}", report);
+        assert_eq!(
+            doctor_report_subject(&report, "project_trust").status,
+            DesktopCheckStatus::Supported
+        );
+        assert_eq!(
+            doctor_report_subject(&report, "legacy_non_shim_threads").status,
+            DesktopCheckStatus::Gated
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn desktop_doctor_reports_untrusted_project_as_unsupported() {
+        let root = unique_temp_dir("desktop-doctor-untrusted");
+        let project_dir = root.join("repo");
+        let codex_home = root.join("codex-home");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        std::fs::create_dir_all(&codex_home).expect("create codex home");
+        let shim_config = write_test_shim_config(&root, "deepseek-chat", false);
+
+        cmd_install_codex_config(
+            Some(shim_config.to_string_lossy().as_ref()),
+            None,
+            None,
+            "codex_shim",
+            Some(codex_home.to_string_lossy().as_ref()),
+            Some(project_dir.to_string_lossy().as_ref()),
+            false,
+            None,
+            "http://127.0.0.1:8787/v1",
+            None,
+            None,
+        )
+        .expect("project install");
+
+        let config = sample_config("deepseek-chat", false);
+        let caps = configured_profile_caps(&config);
+        let report = build_desktop_doctor_report(
+            &config,
+            &caps,
+            &project_dir,
+            Some(codex_home.to_string_lossy().as_ref()),
+            "codex_shim",
+        )
+        .expect("doctor report");
+
+        assert!(report.has_unsupported(), "report: {:?}", report);
+        assert_eq!(
+            doctor_report_subject(&report, "project_trust").status,
+            DesktopCheckStatus::Unsupported
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

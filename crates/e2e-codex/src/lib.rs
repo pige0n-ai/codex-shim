@@ -218,6 +218,28 @@ web_search_request = false
     Ok(())
 }
 
+fn write_codex_home_project_trust_only(home: &Path, project_dir: &Path) -> anyhow::Result<()> {
+    let project_dir = project_dir.to_string_lossy();
+    let config_content = format!(
+        r#"
+approval_policy = "never"
+sandbox_mode = "read-only"
+web_search = "disabled"
+
+[tools]
+web_search = false
+
+[features]
+web_search_request = false
+
+[projects."{project_dir}"]
+trust_level = "trusted"
+"#
+    );
+    std::fs::write(home.join("config.toml"), config_content.trim())?;
+    Ok(())
+}
+
 fn local_shim_provider_block(shim_url: &str, stream_timeout_ms: u32) -> String {
     format!(
         r#"[model_providers.local-shim]
@@ -257,6 +279,16 @@ pub fn generate_codex_home_default_provider(
     Ok(home)
 }
 
+pub fn generate_codex_home_project_trust_only(
+    base: &Path,
+    project_dir: &Path,
+) -> anyhow::Result<PathBuf> {
+    let home = base.join("codex_home");
+    std::fs::create_dir_all(&home)?;
+    write_codex_home_project_trust_only(&home, project_dir)?;
+    Ok(home)
+}
+
 /// Generate CODEX_HOME with full reasoning support (for blackbox tests).
 pub fn generate_codex_home(base: &Path, shim_url: &str, model: &str) -> anyhow::Result<PathBuf> {
     let catalog = build_catalog_json(model, true);
@@ -283,6 +315,43 @@ pub fn generate_codex_home_bare(
         model,
         &catalog,
     )
+}
+
+pub fn write_project_codex_config(
+    project_dir: &Path,
+    shim_url: &str,
+    model: &str,
+) -> anyhow::Result<()> {
+    let catalog = build_catalog_json(model, true);
+    let codex_dir = project_dir.join(".codex");
+    std::fs::create_dir_all(codex_dir.join("codex-shim"))?;
+    let catalog_path = codex_dir.join("codex-shim").join("model-catalog.json");
+    std::fs::write(&catalog_path, serde_json::to_string_pretty(&catalog)?)?;
+
+    let catalog_abs = catalog_path.to_string_lossy();
+    let config_content = format!(
+        r#"
+model_provider = "local-shim"
+model = "{model}"
+model_catalog_json = "{catalog_abs}"
+approval_policy = "never"
+sandbox_mode = "read-only"
+web_search = "disabled"
+
+[tools]
+web_search = false
+
+[features]
+web_search_request = false
+
+{provider_block}
+"#,
+        model = model,
+        catalog_abs = catalog_abs,
+        provider_block = local_shim_provider_block(shim_url, 120000).trim(),
+    );
+    std::fs::write(codex_dir.join("config.toml"), config_content.trim())?;
+    Ok(())
 }
 
 pub fn discover_codex_auth_json() -> Option<PathBuf> {
