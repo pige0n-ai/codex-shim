@@ -195,33 +195,24 @@ forwarded to upstream providers.
 
 ## Built-in Provider Profiles
 
-| Profile | Upstream | Endpoint | Reasoning |
-|---------|----------|----------|-----------|
-| `deepseek-chat` | api.deepseek.com | Chat Shim | `reasoning_content` |
-| `sglang-chat` | localhost:30000/v1 | Chat Shim | `reasoning_content` + `chat_template_kwargs` |
-| `vllm-responses` | localhost:8000/v1 | Native Responses | native reasoning item |
-| `vllm-chat` | localhost:8000/v1 | Chat Shim | `reasoning_content` |
-| `ollama-responses` | localhost:11434/v1 | Stateless Responses | native reasoning item |
-| `ollama-chat` | localhost:11434/v1 | Chat Shim | generic |
-| `llamacpp-responses` | localhost:8080/v1 | Native Responses | native |
-| `llamacpp-chat` | localhost:8080/v1 | Chat Shim | generic |
-| `openrouter-responses` | openrouter.ai/api/v1 | Stateless Responses | `reasoning_details` |
-| `openrouter-chat` | openrouter.ai/api/v1 | Chat Shim | `reasoning_details` |
-| `alibaba-responses` | dashscope.aliyuncs.com | Native Responses (stateful) | `enable_thinking` |
-| `alibaba-chat` | dashscope.aliyuncs.com | Chat Shim | `enable_thinking` |
-| `groq-chat` | api.groq.com | Chat Shim | generic |
-| `together-chat` | api.together.xyz | Chat Shim | generic |
-| `fireworks-chat` | api.fireworks.ai | Chat Shim | generic |
-| `generic-chat` | (configurable) | Chat Shim | generic |
+Bundled hosted-provider presets now include:
 
-Detailed config per provider in `examples/<profile>/config.yaml`.
+- chat-only: `deepseek-chat`, `zai-chat`, `moonshot-chat`, `minimax-chat`, `gemini-chat`, `vertex-chat`
+- chat + responses: `alibaba-chat`, `alibaba-responses`, `fireworks-chat`, `fireworks-responses`, `xai-chat`, `xai-responses`, `bedrock-chat`, `bedrock-responses`
+- router/self-hosted variants: `openrouter-chat`, `openrouter-responses`, `groq-chat`, `groq-responses`, `together-chat`, `ollama-chat`, `ollama-responses`, `llamacpp-chat`, `llamacpp-responses`, `vllm-chat`, `vllm-responses`, `sglang-chat`
+- generic fallback: `generic-chat`
+
+For the audited endpoint support, streaming-usage notes, statefulness, auth
+shape, and official evidence links, see
+[docs/provider-compatibility.md](/home/vivec/codex-shim/docs/provider-compatibility.md).
 
 ## Example Configs
 
 Every bundled `examples/<profile>/config.yaml` is meant to be runnable after you:
 
 - set the required API key environment variable if the provider is remote
-- replace any `your-...-model` placeholder with a real model slug from that provider
+- replace any remaining local/self-hosted placeholder model with the actual
+  model route exposed by your deployment
 - keep `models.default` and `models.catalog[0].slug` in sync
 
 If you only want one path to copy first, start with:
@@ -229,6 +220,8 @@ If you only want one path to copy first, start with:
 - `examples/deepseek-chat/config.yaml` for a hosted Chat Completions provider
 - `examples/openrouter-responses/config.yaml` for a stateless Responses provider
 - `examples/ollama-chat/config.yaml` or `examples/ollama-responses/config.yaml` for local OSS
+- `examples/gemini-chat/config.yaml` or `examples/xai-responses/config.yaml`
+  for newly added hosted providers
 
 ## Configuration Summary
 

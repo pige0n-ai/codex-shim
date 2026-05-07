@@ -1,7 +1,7 @@
 use protocol::provider_caps::{
     EndpointMode, ProviderCapabilities, ReasoningPolicy, StatePolicy, ToolPolicy,
 };
-use providers::{ProviderProfile, create_profile};
+use providers::{ProviderProfile, create_profile, preset_capabilities};
 use serde::{Deserialize, Serialize};
 
 /// Provider profile configuration (from YAML).
@@ -57,6 +57,10 @@ pub struct ProviderCapabilitiesOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_reasoning_effort: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_stream_usage: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reliable_stream_usage_for_compaction: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_usage_in_stream_final: Option<bool>,
 }
 
@@ -68,26 +72,8 @@ impl ProviderProfileConfig {
     /// Build a ProviderProfile from this config, applying any overrides.
     pub fn build_profile(&self) -> Box<dyn ProviderProfile> {
         let override_caps = self.capabilities.as_ref().map(|o| {
-            let base = match self.profile.as_str() {
-                "deepseek-chat" => ProviderCapabilities::deepseek_chat(),
-                "sglang-chat" => ProviderCapabilities::sglang_chat(),
-                "vllm-responses" => ProviderCapabilities::vllm_responses(),
-                "vllm-chat" => ProviderCapabilities::vllm_chat(),
-                "ollama-responses" => ProviderCapabilities::ollama_responses(),
-                "ollama-chat" => ProviderCapabilities::ollama_chat(),
-                "llamacpp-responses" => ProviderCapabilities::llamacpp_responses(),
-                "llamacpp-chat" => ProviderCapabilities::llamacpp_chat(),
-                "openrouter-responses" => ProviderCapabilities::openrouter_responses(),
-                "openrouter-chat" => ProviderCapabilities::openrouter_chat(),
-                "alibaba-responses" => ProviderCapabilities::alibaba_responses(),
-                "alibaba-chat" => ProviderCapabilities::alibaba_chat(),
-                "groq-responses" => ProviderCapabilities::groq_responses(),
-                "groq-chat" => ProviderCapabilities::groq_chat(),
-                "together-chat" => ProviderCapabilities::together_chat(),
-                "fireworks-chat" => ProviderCapabilities::fireworks_chat(),
-                "generic-chat" => ProviderCapabilities::generic_chat(),
-                _ => ProviderCapabilities::generic_chat(),
-            };
+            let base = preset_capabilities(&self.profile)
+                .unwrap_or_else(ProviderCapabilities::generic_chat);
             apply_capability_overrides(base, o)
         });
 
@@ -144,8 +130,15 @@ fn apply_capability_overrides(
     if let Some(v) = overrides.supports_reasoning_effort {
         caps.supports_reasoning_effort = v;
     }
+    if let Some(v) = overrides.request_stream_usage {
+        caps.request_stream_usage = v;
+    }
+    if let Some(v) = overrides.reliable_stream_usage_for_compaction {
+        caps.reliable_stream_usage_for_compaction = v;
+    }
     if let Some(v) = overrides.supports_usage_in_stream_final {
-        caps.supports_usage_in_stream_final = v;
+        caps.request_stream_usage = v;
+        caps.reliable_stream_usage_for_compaction = v;
     }
     caps
 }

@@ -1,0 +1,27 @@
+# ── Vertex AI OpenAI-Compatible Chat Completions ──────────────────
+# Codex-facing: Responses  │  Upstream: Chat Completions (adapter-internal shim)
+#
+# This example targets Gemini models on Vertex AI.
+server:
+  listen: "127.0.0.1:8787"
+upstream:
+  base_url: "https://aiplatform.googleapis.com/v1/projects/YOUR_PROJECT_ID/locations/global/endpoints/openapi"
+  api_key_env: "OPENAI_API_KEY"
+  auth_command:
+    command: "gcloud"
+    args: ["auth", "application-default", "print-access-token"]
+    timeout_ms: 5000
+    refresh_interval_ms: 3000000
+provider:
+  kind: vertex-chat
+  profile_config:
+    profile: vertex-chat
+models:
+  default: "gemini-2.5-flash"
+  catalog:
+    - slug: "gemini-2.5-flash"
+      context_window: 131072
+state:
+  backend: memory
+logging:
+  level: info

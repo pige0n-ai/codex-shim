@@ -41,11 +41,11 @@ reasoning:
   effort: high
 
 models:
-  # Replace both fields with the OpenRouter model slug you want Codex to use.
-  default: "your-openrouter-model"
+  # OpenRouter routes many third-party models. This example uses Kimi K2.6.
+  default: "moonshotai/kimi-k2.6"
   catalog:
-    - slug: "your-openrouter-model"
-      context_window: 131072
+    - slug: "moonshotai/kimi-k2.6"
+      context_window: 262144
 
 state:
   backend: memory          # use sqlite for longer TTL

@@ -1,0 +1,20 @@
+# ── MiniMax OpenAI-Compatible Chat Completions ────────────────────
+# Codex-facing: Responses  │  Upstream: Chat Completions (adapter-internal shim)
+server:
+  listen: "127.0.0.1:8787"
+upstream:
+  base_url: "https://api.minimaxi.com/v1"
+  api_key_env: "MINIMAX_API_KEY"
+provider:
+  kind: minimax-chat
+  profile_config:
+    profile: minimax-chat
+models:
+  default: "MiniMax-M2.7"
+  catalog:
+    - slug: "MiniMax-M2.7"
+      context_window: 204800
+state:
+  backend: memory
+logging:
+  level: info

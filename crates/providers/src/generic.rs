@@ -5,6 +5,7 @@ use protocol::responses::ResponsesCreateRequest;
 use crate::{ExtraBody, ProviderProfile};
 
 pub struct GenericProvider {
+    kind: String,
     caps: ProviderCapabilities,
     extra_body: ExtraBody,
 }
@@ -12,6 +13,15 @@ pub struct GenericProvider {
 impl GenericProvider {
     pub fn new(caps: ProviderCapabilities) -> Self {
         Self {
+            kind: "generic-openai-chat".into(),
+            caps,
+            extra_body: ExtraBody::default(),
+        }
+    }
+
+    pub fn named(kind: &str, caps: ProviderCapabilities) -> Self {
+        Self {
+            kind: kind.to_string(),
             caps,
             extra_body: ExtraBody::default(),
         }
@@ -28,7 +38,7 @@ impl ProviderProfile for GenericProvider {
         &self.caps
     }
     fn kind(&self) -> &str {
-        "generic-openai-chat"
+        &self.kind
     }
     fn chat_path(&self) -> &str {
         "/v1/chat/completions"
@@ -68,7 +78,7 @@ impl ProviderProfile for GenericProvider {
     }
 
     fn pre_send(&self, req: &mut ChatCompletionRequest) {
-        if req.stream == Some(true) && self.caps.supports_usage_in_stream_final {
+        if req.stream == Some(true) && self.caps.request_stream_usage {
             req.extra_body["stream_options"] = serde_json::json!({
                 "include_usage": true
             });
@@ -93,7 +103,7 @@ mod tests {
     #[test]
     fn pre_send_requests_stream_usage_when_supported() {
         let provider = GenericProvider::new(ProviderCapabilities {
-            supports_usage_in_stream_final: true,
+            request_stream_usage: true,
             ..ProviderCapabilities::generic_chat()
         });
         let mut req = ChatCompletionRequest {
@@ -121,5 +131,35 @@ mod tests {
             req.extra_body["stream_options"]["include_usage"],
             serde_json::Value::Bool(true)
         );
+    }
+
+    #[test]
+    fn pre_send_leaves_stream_options_untouched_when_usage_not_requested() {
+        let provider = GenericProvider::new(ProviderCapabilities {
+            request_stream_usage: false,
+            ..ProviderCapabilities::generic_chat()
+        });
+        let mut req = ChatCompletionRequest {
+            model: "test".into(),
+            messages: vec![],
+            stream: Some(true),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            presence_penalty: None,
+            frequency_penalty: None,
+            stop: None,
+            tools: None,
+            tool_choice: None,
+            parallel_tool_calls: None,
+            response_format: None,
+            reasoning_effort: None,
+            thinking: None,
+            extra_body: serde_json::json!({}),
+        };
+
+        provider.pre_send(&mut req);
+
+        assert!(req.extra_body.get("stream_options").is_none());
     }
 }

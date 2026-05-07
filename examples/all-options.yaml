@@ -95,7 +95,10 @@ provider:
       supports_code_interpreter: null
       supports_previous_response_id: null
       supports_reasoning_effort: null
-      supports_usage_in_stream_final: null
+      # Request `stream_options.include_usage=true` on chat-completions streams.
+      request_stream_usage: null
+      # Use streamed usage as compact / CI evidence only when it is stable.
+      reliable_stream_usage_for_compaction: null
 
     # Provider-specific request body fields injected upstream.
     extra_body:

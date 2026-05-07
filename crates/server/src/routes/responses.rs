@@ -318,36 +318,12 @@ async fn handle_stream(
                     let data = event.data;
 
                     if data == "[DONE]" {
-                        let final_chunk = protocol::chat::ChatCompletionChunk {
-                            id: String::new(),
-                            object: "chat.completion.chunk".into(),
-                            created: created_at,
-                            model: model.clone(),
-                            choices: Some(vec![protocol::chat::ChatChunkChoice {
-                                index: 0,
-                                delta: protocol::chat::ChatDelta::default(),
-                                finish_reason: Some("stop".into()),
-                            }]),
-                            usage: None,
-                        };
-                        match stream_state.process_chunk(&final_chunk) {
-                            Ok(events) => {
-                                for event in events {
-                                    // Capture the completed response JSON for store
-                                    if let ResponseSseEvent::ResponseCompleted { ref response } =
-                                        event
-                                    {
-                                        response_body =
-                                            serde_json::to_value(response).unwrap_or_default();
-                                    }
-                                    let _ = tx.send(Ok(event)).await;
-                                }
+                        for event in stream_state.complete() {
+                            // Capture the completed response JSON for store
+                            if let ResponseSseEvent::ResponseCompleted { ref response } = event {
+                                response_body = serde_json::to_value(response).unwrap_or_default();
                             }
-                            Err(e) => {
-                                let _ = tx
-                                    .send(Ok(ResponseSseEvent::Error { error: e.error }))
-                                    .await;
-                            }
+                            let _ = tx.send(Ok(event)).await;
                         }
                         break;
                     }

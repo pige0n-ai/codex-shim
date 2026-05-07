@@ -276,15 +276,23 @@ fn scan_tree_for_needles(root: &std::path::Path, needles: &[&str]) -> bool {
 
 fn provider_supports_compaction_evidence(profile: &str) -> bool {
     match profile {
-        "deepseek-chat" => ProviderCapabilities::deepseek_chat().supports_usage_in_stream_final,
-        "fireworks-chat" => ProviderCapabilities::fireworks_chat().supports_usage_in_stream_final,
-        "openrouter-chat" => ProviderCapabilities::openrouter_chat().supports_usage_in_stream_final,
-        "openrouter-responses" => {
-            ProviderCapabilities::openrouter_responses().supports_usage_in_stream_final
+        "deepseek-chat" => {
+            ProviderCapabilities::deepseek_chat().reliable_stream_usage_for_compaction
         }
-        "groq-chat" => ProviderCapabilities::groq_chat().supports_usage_in_stream_final,
-        "together-chat" => ProviderCapabilities::together_chat().supports_usage_in_stream_final,
-        "generic-chat" => ProviderCapabilities::generic_chat().supports_usage_in_stream_final,
+        "fireworks-chat" => {
+            ProviderCapabilities::fireworks_chat().reliable_stream_usage_for_compaction
+        }
+        "openrouter-chat" => {
+            ProviderCapabilities::openrouter_chat().reliable_stream_usage_for_compaction
+        }
+        "openrouter-responses" => {
+            ProviderCapabilities::openrouter_responses().reliable_stream_usage_for_compaction
+        }
+        "groq-chat" => ProviderCapabilities::groq_chat().reliable_stream_usage_for_compaction,
+        "together-chat" => {
+            ProviderCapabilities::together_chat().reliable_stream_usage_for_compaction
+        }
+        "generic-chat" => ProviderCapabilities::generic_chat().reliable_stream_usage_for_compaction,
         _ => true,
     }
 }

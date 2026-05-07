@@ -552,47 +552,16 @@ fn configured_profile_caps(config: &Config) -> ProviderCapabilities {
 }
 
 fn explicit_profile_caps(profile: &str) -> anyhow::Result<ProviderCapabilities> {
-    if !is_supported_profile(profile) {
+    if !providers::is_supported_profile_name(profile) {
         bail!(
             "unknown provider profile '{}'. Supported profiles: {}",
             profile,
-            supported_profiles().join(", ")
+            providers::SUPPORTED_PROFILE_NAMES.join(", ")
         );
     }
     Ok(providers::create_profile(profile, None)
         .capabilities()
         .clone())
-}
-
-fn supported_profiles() -> &'static [&'static str] {
-    &[
-        "deepseek-chat",
-        "sglang-chat",
-        "vllm-responses",
-        "vllm-chat",
-        "ollama-responses",
-        "ollama-chat",
-        "llamacpp-responses",
-        "llamacpp-chat",
-        "openrouter-responses",
-        "openrouter-chat",
-        "alibaba-responses",
-        "alibaba-chat",
-        "groq-responses",
-        "groq-chat",
-        "together-chat",
-        "fireworks-chat",
-        "generic-chat",
-        "deepseek",
-        "sglang",
-        "vllm",
-        "generic",
-        "generic-openai-chat",
-    ]
-}
-
-fn is_supported_profile(profile: &str) -> bool {
-    supported_profiles().contains(&profile)
 }
 
 fn resolve_codex_home(codex_home: Option<&str>) -> anyhow::Result<PathBuf> {

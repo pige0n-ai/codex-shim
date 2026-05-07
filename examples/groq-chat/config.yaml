@@ -13,10 +13,9 @@ provider:
     capabilities:
       supports_parallel_tool_calls: false
 models:
-  # Replace both fields with a model available on your Groq account.
-  default: "your-groq-model"
+  default: "llama-3.3-70b-versatile"
   catalog:
-    - slug: "your-groq-model"
+    - slug: "llama-3.3-70b-versatile"
       context_window: 131072
 state:
   backend: memory

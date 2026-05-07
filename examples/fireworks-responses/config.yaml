@@ -1,0 +1,20 @@
+# ── Fireworks AI Responses API ────────────────────────────────────
+# Codex-facing: Responses  │  Upstream: Native Responses
+server:
+  listen: "127.0.0.1:8787"
+upstream:
+  base_url: "https://api.fireworks.ai/inference/v1"
+  api_key_env: "FIREWORKS_API_KEY"
+provider:
+  kind: fireworks-responses
+  profile_config:
+    profile: fireworks-responses
+models:
+  default: "accounts/fireworks/models/qwen3-235b-a22b"
+  catalog:
+    - slug: "accounts/fireworks/models/qwen3-235b-a22b"
+      context_window: 131072
+state:
+  backend: memory
+logging:
+  level: info

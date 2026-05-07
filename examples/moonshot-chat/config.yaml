@@ -1,0 +1,24 @@
+# ── Moonshot / Kimi OpenAI-Compatible Chat Completions ────────────
+# Codex-facing: Responses  │  Upstream: Chat Completions (adapter-internal shim)
+server:
+  listen: "127.0.0.1:8787"
+upstream:
+  base_url: "https://api.moonshot.ai/v1"
+  api_key_env: "MOONSHOT_API_KEY"
+provider:
+  kind: moonshot-chat
+  profile_config:
+    profile: moonshot-chat
+    extra_body:
+      # Kimi exposes thinking via an extra request body field.
+      thinking:
+        type: disabled
+models:
+  default: "kimi-k2.6"
+  catalog:
+    - slug: "kimi-k2.6"
+      context_window: 262144
+state:
+  backend: memory
+logging:
+  level: info

@@ -11,10 +11,10 @@ provider:
   profile_config:
     profile: fireworks-chat
 models:
-  # Replace both fields with a model that exists in your Fireworks account.
-  default: "accounts/fireworks/models/your-model"
+  # Fireworks' own Responses guide uses qwen3-235b-a22b in examples.
+  default: "accounts/fireworks/models/qwen3-235b-a22b"
   catalog:
-    - slug: "accounts/fireworks/models/your-model"
+    - slug: "accounts/fireworks/models/qwen3-235b-a22b"
       context_window: 131072
 state:
   backend: memory

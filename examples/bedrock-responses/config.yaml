@@ -1,0 +1,28 @@
+# ── Amazon Bedrock Responses API ──────────────────────────────────
+# Codex-facing: Responses  │  Upstream: Native Responses
+#
+# Replace the region-specific endpoint and auth helper for your environment.
+server:
+  listen: "127.0.0.1:8787"
+upstream:
+  base_url: "https://bedrock-mantle.us-east-1.api.aws/v1"
+  api_key_env: "BEDROCK_API_KEY"
+  auth_command:
+    # Example placeholder: print a Bedrock API key from your own secret store.
+    command: "/usr/local/bin/fetch-bedrock-api-key"
+    args: []
+    timeout_ms: 5000
+    refresh_interval_ms: 300000
+provider:
+  kind: bedrock-responses
+  profile_config:
+    profile: bedrock-responses
+models:
+  default: "amazon.nova-pro-v1:0"
+  catalog:
+    - slug: "amazon.nova-pro-v1:0"
+      context_window: 131072
+state:
+  backend: memory
+logging:
+  level: info

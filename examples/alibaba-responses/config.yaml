@@ -2,7 +2,7 @@
 server:
   listen: "127.0.0.1:8787"
 upstream:
-  base_url: "https://dashscope.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1"
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
   api_key_env: "DASHSCOPE_API_KEY"
 provider:
   kind: alibaba-responses
@@ -11,9 +11,9 @@ provider:
     extra_body:
       enable_thinking: true
 models:
-  default: "qwen3.5-max"
+  default: "qwen3.6-plus"
   catalog:
-    - slug: "qwen3.5-max"
+    - slug: "qwen3.6-plus"
       context_window: 131072
 state:
   backend: memory

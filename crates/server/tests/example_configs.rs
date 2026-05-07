@@ -37,5 +37,29 @@ fn bundled_shim_examples_load_and_validate() {
         config
             .validate()
             .unwrap_or_else(|err| panic!("failed to validate {}: {err}", config_path.display()));
+
+        let relative = config_path
+            .strip_prefix(&root)
+            .unwrap_or(&config_path)
+            .to_string_lossy()
+            .to_string();
+        if matches!(
+            relative.as_str(),
+            "examples/bedrock-chat/config.yaml"
+                | "examples/bedrock-responses/config.yaml"
+                | "examples/vertex-chat/config.yaml"
+        ) {
+            let auth = config.upstream.auth_command.as_ref().unwrap_or_else(|| {
+                panic!(
+                    "{} must define upstream.auth_command",
+                    config_path.display()
+                )
+            });
+            assert!(
+                !auth.command.trim().is_empty(),
+                "{} must define a non-empty auth command",
+                config_path.display()
+            );
+        }
     }
 }

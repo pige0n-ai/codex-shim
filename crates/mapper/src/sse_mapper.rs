@@ -160,16 +160,18 @@ impl StreamState {
             }
         }
 
-        // Handle stream end — only emit once
-        if !self.completed_sent
-            && let Some(fr) = &self.finish_reason
-            && (fr == "stop" || fr == "tool_calls" || fr == "length" || fr == "content_filter")
-        {
-            self.completed_sent = true;
-            self.emit_completion_events(&mut events);
-        }
-
         Ok(events)
+    }
+
+    /// Emit the final completion lifecycle events once the upstream stream ends.
+    pub fn complete(&mut self) -> Vec<ResponseSseEvent> {
+        if self.completed_sent {
+            return Vec::new();
+        }
+        self.completed_sent = true;
+        let mut events = Vec::new();
+        self.emit_completion_events(&mut events);
+        events
     }
 
     fn emit_completion_events(&self, events: &mut Vec<ResponseSseEvent>) {
@@ -279,5 +281,120 @@ impl StreamState {
         shell.usage = Some(self.final_usage.clone().unwrap_or_default());
 
         events.push(ResponseSseEvent::ResponseCompleted { response: shell });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StreamState;
+    use protocol::chat::{ChatChunkChoice, ChatCompletionChunk, ChatDelta};
+    use protocol::common::Usage;
+    use protocol::sse::ResponseSseEvent;
+
+    fn chunk(
+        content: Option<&str>,
+        finish_reason: Option<&str>,
+        usage: Option<Usage>,
+        empty_choices: bool,
+    ) -> ChatCompletionChunk {
+        ChatCompletionChunk {
+            id: "chatcmpl_test".into(),
+            object: "chat.completion.chunk".into(),
+            created: 1,
+            model: "test-model".into(),
+            choices: if empty_choices {
+                Some(vec![])
+            } else {
+                Some(vec![ChatChunkChoice {
+                    index: 0,
+                    delta: ChatDelta {
+                        content: content.map(str::to_string),
+                        ..ChatDelta::default()
+                    },
+                    finish_reason: finish_reason.map(str::to_string),
+                }])
+            },
+            usage,
+        }
+    }
+
+    fn completed_usage(events: &[ResponseSseEvent]) -> Usage {
+        events
+            .iter()
+            .find_map(|event| match event {
+                ResponseSseEvent::ResponseCompleted { response } => response.usage.clone(),
+                _ => None,
+            })
+            .expect("response.completed usage")
+    }
+
+    #[test]
+    fn complete_keeps_usage_from_final_empty_chunk() {
+        let mut state =
+            StreamState::new("resp_test".into(), "test-model".into(), 1, "out_1".into());
+
+        state
+            .process_chunk(&chunk(Some("Hello"), None, None, false))
+            .expect("text chunk");
+        state
+            .process_chunk(&chunk(None, Some("stop"), None, false))
+            .expect("finish chunk");
+        state
+            .process_chunk(&chunk(
+                None,
+                None,
+                Some(Usage {
+                    input_tokens: 11,
+                    output_tokens: 7,
+                    total_tokens: 18,
+                    input_tokens_details: None,
+                    output_tokens_details: None,
+                }),
+                true,
+            ))
+            .expect("usage chunk");
+
+        let events = state.complete();
+        let usage = completed_usage(&events);
+        assert_eq!(usage.total_tokens, 18);
+    }
+
+    #[test]
+    fn complete_uses_latest_streamed_usage_totals() {
+        let mut state =
+            StreamState::new("resp_test".into(), "test-model".into(), 1, "out_1".into());
+
+        state
+            .process_chunk(&chunk(
+                Some("Hi"),
+                None,
+                Some(Usage {
+                    input_tokens: 10,
+                    output_tokens: 1,
+                    total_tokens: 11,
+                    input_tokens_details: None,
+                    output_tokens_details: None,
+                }),
+                false,
+            ))
+            .expect("first chunk");
+        state
+            .process_chunk(&chunk(
+                None,
+                Some("stop"),
+                Some(Usage {
+                    input_tokens: 10,
+                    output_tokens: 3,
+                    total_tokens: 13,
+                    input_tokens_details: None,
+                    output_tokens_details: None,
+                }),
+                false,
+            ))
+            .expect("final chunk");
+
+        let events = state.complete();
+        let usage = completed_usage(&events);
+        assert_eq!(usage.total_tokens, 13);
     }
 }

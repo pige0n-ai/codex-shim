@@ -29,6 +29,11 @@ Pick one of these starting points:
 - stateless Responses provider: `examples/openrouter-responses/config.yaml`
 - local OSS provider: `examples/ollama-chat/config.yaml`
 
+For the full built-in profile matrix, including which providers have native
+`/responses`, how streaming usage behaves, and which examples use
+`auth_command`, see
+[docs/provider-compatibility.md](/home/vivec/codex-shim/docs/provider-compatibility.md).
+
 ### 2. Copy the shim config to its normal location
 
 macOS / Linux:
@@ -238,8 +243,11 @@ Choose the shim profile that matches the upstream API shape you want to use.
 Examples:
 
 - `deepseek-chat`
+- `gemini-chat`
+- `moonshot-chat`
 - `openrouter-chat`
 - `openrouter-responses`
+- `fireworks-responses`
 - `vllm-responses`
 - `ollama-chat`
 - `ollama-responses`

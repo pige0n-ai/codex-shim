@@ -1,0 +1,20 @@
+# ── Gemini API (Google AI Studio) OpenAI Compatibility ────────────
+# Codex-facing: Responses  │  Upstream: Chat Completions (adapter-internal shim)
+server:
+  listen: "127.0.0.1:8787"
+upstream:
+  base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
+  api_key_env: "GEMINI_API_KEY"
+provider:
+  kind: gemini-chat
+  profile_config:
+    profile: gemini-chat
+models:
+  default: "gemini-3-flash-preview"
+  catalog:
+    - slug: "gemini-3-flash-preview"
+      context_window: 131072
+state:
+  backend: memory
+logging:
+  level: info

@@ -13,10 +13,10 @@ provider:
     capabilities:
       supports_parallel_tool_calls: true
 models:
-  # Replace both fields with a Together model slug available to your account.
-  default: "your-together-model"
+  # Together recommends Llama 3.3 70B Turbo as a default starting point.
+  default: "meta-llama/Llama-3.3-70B-Instruct-Turbo"
   catalog:
-    - slug: "your-together-model"
+    - slug: "meta-llama/Llama-3.3-70B-Instruct-Turbo"
       context_window: 131072
 state:
   backend: memory

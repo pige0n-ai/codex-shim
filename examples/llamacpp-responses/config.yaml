@@ -1,0 +1,20 @@
+# ── llama.cpp server via Responses API ────────────────────────────
+# Codex-facing: Responses  │  Upstream: Responses API (stateless, chat-backed)
+server:
+  listen: "127.0.0.1:8787"
+upstream:
+  base_url: "http://127.0.0.1:8080/v1"
+provider:
+  kind: llamacpp-responses
+  profile_config:
+    profile: llamacpp-responses
+models:
+  # Replace with the model route you configured in llama-server.
+  default: "local-model"
+  catalog:
+    - slug: "local-model"
+      context_window: 131072
+state:
+  backend: memory
+logging:
+  level: info

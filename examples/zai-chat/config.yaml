@@ -1,0 +1,23 @@
+# ── Z.AI / GLM OpenAI-Compatible Chat Completions ────────────────
+# Codex-facing: Responses  │  Upstream: Chat Completions (adapter-internal shim)
+server:
+  listen: "127.0.0.1:8787"
+upstream:
+  base_url: "https://api.z.ai/api/paas/v4"
+  api_key_env: "ZAI_API_KEY"
+provider:
+  kind: zai-chat
+  profile_config:
+    profile: zai-chat
+    extra_body:
+      thinking:
+        type: enabled
+models:
+  default: "glm-5.1"
+  catalog:
+    - slug: "glm-5.1"
+      context_window: 200000
+state:
+  backend: memory
+logging:
+  level: info

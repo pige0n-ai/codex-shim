@@ -1,0 +1,20 @@
+# ── xAI Chat Completions ──────────────────────────────────────────
+# Codex-facing: Responses  │  Upstream: Chat Completions (adapter-internal shim)
+server:
+  listen: "127.0.0.1:8787"
+upstream:
+  base_url: "https://api.x.ai/v1"
+  api_key_env: "XAI_API_KEY"
+provider:
+  kind: xai-chat
+  profile_config:
+    profile: xai-chat
+models:
+  default: "grok-4.20-reasoning"
+  catalog:
+    - slug: "grok-4.20-reasoning"
+      context_window: 131072
+state:
+  backend: memory
+logging:
+  level: info

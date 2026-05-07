@@ -111,6 +111,109 @@ pub trait ProviderProfile: Send + Sync {
     }
 }
 
+pub const CANONICAL_PROFILE_NAMES: &[&str] = &[
+    "deepseek-chat",
+    "sglang-chat",
+    "vllm-responses",
+    "vllm-chat",
+    "ollama-responses",
+    "ollama-chat",
+    "llamacpp-responses",
+    "llamacpp-chat",
+    "openrouter-responses",
+    "openrouter-chat",
+    "alibaba-responses",
+    "alibaba-chat",
+    "groq-responses",
+    "groq-chat",
+    "together-chat",
+    "fireworks-responses",
+    "fireworks-chat",
+    "xai-responses",
+    "xai-chat",
+    "bedrock-responses",
+    "bedrock-chat",
+    "gemini-chat",
+    "vertex-chat",
+    "minimax-chat",
+    "moonshot-chat",
+    "zai-chat",
+    "generic-chat",
+];
+
+pub const SUPPORTED_PROFILE_NAMES: &[&str] = &[
+    "deepseek-chat",
+    "sglang-chat",
+    "vllm-responses",
+    "vllm-chat",
+    "ollama-responses",
+    "ollama-chat",
+    "llamacpp-responses",
+    "llamacpp-chat",
+    "openrouter-responses",
+    "openrouter-chat",
+    "alibaba-responses",
+    "alibaba-chat",
+    "groq-responses",
+    "groq-chat",
+    "together-chat",
+    "fireworks-responses",
+    "fireworks-chat",
+    "xai-responses",
+    "xai-chat",
+    "bedrock-responses",
+    "bedrock-chat",
+    "gemini-chat",
+    "vertex-chat",
+    "minimax-chat",
+    "moonshot-chat",
+    "zai-chat",
+    "generic-chat",
+    "deepseek",
+    "sglang",
+    "vllm",
+    "generic",
+    "generic-openai-chat",
+];
+
+pub fn preset_capabilities(profile_name: &str) -> Option<ProviderCapabilities> {
+    let caps = match profile_name {
+        "deepseek-chat" | "deepseek" => ProviderCapabilities::deepseek_chat(),
+        "sglang-chat" | "sglang" => ProviderCapabilities::sglang_chat(),
+        "vllm-responses" => ProviderCapabilities::vllm_responses(),
+        "vllm-chat" | "vllm" => ProviderCapabilities::vllm_chat(),
+        "ollama-responses" => ProviderCapabilities::ollama_responses(),
+        "ollama-chat" => ProviderCapabilities::ollama_chat(),
+        "llamacpp-responses" => ProviderCapabilities::llamacpp_responses(),
+        "llamacpp-chat" => ProviderCapabilities::llamacpp_chat(),
+        "openrouter-responses" => ProviderCapabilities::openrouter_responses(),
+        "openrouter-chat" => ProviderCapabilities::openrouter_chat(),
+        "alibaba-responses" => ProviderCapabilities::alibaba_responses(),
+        "alibaba-chat" => ProviderCapabilities::alibaba_chat(),
+        "groq-responses" => ProviderCapabilities::groq_responses(),
+        "groq-chat" => ProviderCapabilities::groq_chat(),
+        "together-chat" => ProviderCapabilities::together_chat(),
+        "fireworks-responses" => ProviderCapabilities::fireworks_responses(),
+        "fireworks-chat" => ProviderCapabilities::fireworks_chat(),
+        "xai-responses" => ProviderCapabilities::xai_responses(),
+        "xai-chat" => ProviderCapabilities::xai_chat(),
+        "bedrock-responses" => ProviderCapabilities::bedrock_responses(),
+        "bedrock-chat" => ProviderCapabilities::bedrock_chat(),
+        "gemini-chat" => ProviderCapabilities::gemini_chat(),
+        "vertex-chat" => ProviderCapabilities::vertex_chat(),
+        "minimax-chat" => ProviderCapabilities::minimax_chat(),
+        "moonshot-chat" => ProviderCapabilities::moonshot_chat(),
+        "zai-chat" => ProviderCapabilities::zai_chat(),
+        "generic-chat" | "generic" | "generic-openai-chat" => ProviderCapabilities::generic_chat(),
+        _ => return None,
+    };
+    Some(caps)
+}
+
+pub fn is_supported_profile_name(profile_name: &str) -> bool {
+    SUPPORTED_PROFILE_NAMES.contains(&profile_name)
+}
+
 /// Create a provider profile from capability presets.
 ///
 /// The returned profile always presents the **Responses API** to Codex.
@@ -123,31 +226,8 @@ pub fn create_profile(
     profile_name: &str,
     override_caps: Option<ProviderCapabilities>,
 ) -> Box<dyn ProviderProfile> {
-    let mut caps = match profile_name {
-        "deepseek-chat" => ProviderCapabilities::deepseek_chat(),
-        "sglang-chat" => ProviderCapabilities::sglang_chat(),
-        "vllm-responses" => ProviderCapabilities::vllm_responses(),
-        "vllm-chat" => ProviderCapabilities::vllm_chat(),
-        "ollama-responses" => ProviderCapabilities::ollama_responses(),
-        "ollama-chat" => ProviderCapabilities::ollama_chat(),
-        "llamacpp-responses" => ProviderCapabilities::llamacpp_responses(),
-        "llamacpp-chat" => ProviderCapabilities::llamacpp_chat(),
-        "openrouter-responses" => ProviderCapabilities::openrouter_responses(),
-        "openrouter-chat" => ProviderCapabilities::openrouter_chat(),
-        "alibaba-responses" => ProviderCapabilities::alibaba_responses(),
-        "alibaba-chat" => ProviderCapabilities::alibaba_chat(),
-        "groq-responses" => ProviderCapabilities::groq_responses(),
-        "groq-chat" => ProviderCapabilities::groq_chat(),
-        "together-chat" => ProviderCapabilities::together_chat(),
-        "fireworks-chat" => ProviderCapabilities::fireworks_chat(),
-        "generic-chat" => ProviderCapabilities::generic_chat(),
-        // Legacy aliases
-        "deepseek" => ProviderCapabilities::deepseek_chat(),
-        "sglang" => ProviderCapabilities::sglang_chat(),
-        "vllm" => ProviderCapabilities::vllm_chat(),
-        "generic" | "generic-openai-chat" => ProviderCapabilities::generic_chat(),
-        _ => ProviderCapabilities::generic_chat(),
-    };
+    let mut caps =
+        preset_capabilities(profile_name).unwrap_or_else(ProviderCapabilities::generic_chat);
 
     if let Some(overrides) = override_caps {
         caps = overrides;
@@ -170,7 +250,7 @@ fn create_chat_shim_profile(name: &str, caps: ProviderCapabilities) -> Box<dyn P
         "deepseek-chat" | "deepseek" => Box::new(DeepSeekProvider::new(caps)),
         "sglang-chat" | "sglang" => Box::new(SglangProvider::new(caps)),
         "vllm-chat" | "vllm" => Box::new(VllmProvider::new(caps)),
-        _ => Box::new(GenericProvider::new(caps)),
+        _ => Box::new(GenericProvider::named(name, caps)),
     }
 }
 
