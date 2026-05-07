@@ -8,8 +8,8 @@
 
 use e2e_codex::mock_upstream::{MockUpstream, Scenario};
 use e2e_codex::{
-    ShimProcess, generate_codex_home, generate_shim_config, generate_shim_config_native,
-    run_codex_exec,
+    ShimProcess, generate_codex_home, generate_codex_home_project_trust_only, generate_shim_config,
+    generate_shim_config_native, run_codex_exec, write_project_codex_config,
 };
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -134,6 +134,39 @@ async fn codex_mock_request_builder_headers_query_auth() {
         Some(&"e2e-test".to_string())
     );
     drop(mock);
+}
+
+#[tokio::test]
+#[ignore = "requires codex binary"]
+async fn codex_mock_project_config_trusted_basic() {
+    let (mock, shim, tmp, workdir) = setup("deepseek-chat", "mock-model").await.expect("setup");
+    let codex_home = generate_codex_home_project_trust_only(tmp.path(), workdir.path()).unwrap();
+    write_project_codex_config(workdir.path(), &shim.base_url(), "mock-model")
+        .expect("project config");
+
+    let result = run_codex_exec(
+        &codex_home,
+        workdir.path(),
+        "Return exactly CODEX_SHIM_E2E_OK. Do not edit files.",
+        &[],
+    )
+    .await
+    .expect("codex exec");
+
+    drop(shim);
+    drop(mock);
+
+    assert!(
+        result.status.success(),
+        "codex exit code should be 0, got {:?}\n--- stderr ---\n{}\n--- end stderr ---",
+        result.status.code(),
+        result.stderr,
+    );
+    assert!(
+        result.last_message.contains("CODEX_SHIM_E2E_OK"),
+        "last_message should contain CODEX_SHIM_E2E_OK, got: {}",
+        result.last_message
+    );
 }
 
 // ── B2. Direct HTTP request builder (non-ignored) ────────────────
