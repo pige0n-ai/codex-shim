@@ -15,21 +15,25 @@ pub async fn create_response(
     State(state): State<AppState>,
     body: axum::extract::Json<serde_json::Value>,
 ) -> Result<axum::response::Response, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    state.metrics.record_request_received();
+    let metrics = state.metrics.clone();
+    let record_error = |e: ApiError| {
+        metrics.record_request_error(e.error.message.clone());
+        to_status_json(&e)
+    };
     let root = body.0.as_object().ok_or_else(|| {
-        to_status_json(&ApiError::invalid_json(
-            "request body must be a JSON object",
-        ))
+        record_error(ApiError::invalid_json("request body must be a JSON object"))
     })?;
 
     dump_debug_request_body(&body.0);
 
-    validate_top_level_fields(root).map_err(|e| to_status_json(&e))?;
-    validate_raw_input(root.get("input")).map_err(|e| to_status_json(&e))?;
+    validate_top_level_fields(root).map_err(&record_error)?;
+    validate_raw_input(root.get("input")).map_err(&record_error)?;
     if let Some(include) = root.get("include") {
-        validate_include(include).map_err(|e| to_status_json(&e))?;
+        validate_include(include).map_err(&record_error)?;
     }
     if let Some(tools) = root.get("tools") {
-        validate_tools(tools).map_err(|e| to_status_json(&e))?;
+        validate_tools(tools).map_err(&record_error)?;
     }
 
     // Log request details for debugging
@@ -60,11 +64,11 @@ pub async fn create_response(
     let req: ResponsesCreateRequest = serde_json::from_value(body.0).map_err(|e| {
         let msg = format!("Failed to deserialize request: {e}");
         tracing::warn!(error = %e, "Deserialization failure");
-        to_status_json(&ApiError::invalid_json(msg))
+        record_error(ApiError::invalid_json(msg))
     })?;
 
     if req.model.is_empty() {
-        return Err(to_status_json(&ApiError::missing_model()));
+        return Err(record_error(ApiError::missing_model()));
     }
 
     let resolved_model = state.config.resolve_model(&req.model);
@@ -81,7 +85,7 @@ pub async fn create_response(
                 history_messages = record.canonical_messages;
             }
             None => {
-                return Err(to_status_json(&ApiError::response_not_found(prev_id)));
+                return Err(record_error(ApiError::response_not_found(prev_id)));
             }
         }
     }
@@ -90,11 +94,11 @@ pub async fn create_response(
 
     // Parse to canonical IR
     let canonical = CanonicalRequest::from_request(&req, history_messages)
-        .map_err(|e| to_status_json(&ApiError::invalid_json(e)))?;
+        .map_err(|e| record_error(ApiError::invalid_json(e)))?;
 
     // Validate canonical items against provider capabilities (fail-closed)
     protocol::canonical::validate_against_caps(&canonical, state.profile.capabilities())
-        .map_err(|e| to_status_json(&e))?;
+        .map_err(record_error)?;
 
     // Log host tool warnings
     for warning in &canonical.host_tool_warnings {
@@ -196,6 +200,11 @@ async fn handle_non_stream(
     resolved_model: String,
     mapping_config: MappingConfig,
 ) -> Result<axum::response::Response, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    let metrics = state.metrics.clone();
+    let record_error = |e: ApiError| {
+        metrics.record_request_error(e.error.message.clone());
+        to_status_json(&e)
+    };
     // Apply provider-specific normalization before sending
     let mut chat_req = mapped.chat_request.clone();
     let eb = state.profile.extra_body();
@@ -208,7 +217,7 @@ async fn handle_non_stream(
         .upstream
         .send_chat(&chat_req)
         .await
-        .map_err(|e| to_status_json(&e))?;
+        .map_err(record_error)?;
 
     let response_object = mapper::response_mapper::map_chat_response_to_responses(
         &chat_response,
@@ -217,7 +226,7 @@ async fn handle_non_stream(
         &req,
         &mapping_config,
     )
-    .map_err(|e| to_status_json(&e))?;
+    .map_err(record_error)?;
 
     let canonical_messages =
         mapper::response_mapper::build_canonical_messages(&chat_req, &chat_response);
@@ -232,6 +241,10 @@ async fn handle_non_stream(
         response_json: serde_json::to_value(&response_object).unwrap_or_default(),
         canonical_messages,
     });
+    state.metrics.set_store_size(state.store.len());
+    state
+        .metrics
+        .record_request_completed(response_object.usage.as_ref());
 
     Ok(Json(response_object).into_response())
 }
@@ -243,6 +256,11 @@ async fn handle_stream(
     resolved_model: String,
     _mapping_config: MappingConfig,
 ) -> Result<axum::response::Response, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    let metrics = state.metrics.clone();
+    let record_error = |e: ApiError| {
+        metrics.record_request_error(e.error.message.clone());
+        to_status_json(&e)
+    };
     // Apply provider-specific normalization before sending
     let mut chat_req = mapped.chat_request.clone();
     let eb = state.profile.extra_body();
@@ -255,20 +273,20 @@ async fn handle_stream(
         .upstream
         .build_request(reqwest::Method::POST, &state.config.upstream.chat_path)
         .await
-        .map_err(|e| to_status_json(&e))?;
+        .map_err(record_error)?;
 
     let upstream_resp = request_builder
         .json(&chat_req)
         .send()
         .await
-        .map_err(|e| to_status_json(&ApiError::upstream_error(format!("{e}"))))?;
+        .map_err(|e| record_error(ApiError::upstream_error(format!("{e}"))))?;
 
     let status = upstream_resp.status().as_u16();
     tracing::warn!(%status, "Upstream response status");
     if status >= 400 {
         let body = upstream_resp.text().await.unwrap_or_default();
         tracing::warn!(%status, %body, "Upstream error response");
-        return Err(to_status_json(&mapper::error_mapper::map_upstream_error(
+        return Err(record_error(mapper::error_mapper::map_upstream_error(
             status, &body,
         )));
     }
@@ -288,6 +306,7 @@ async fn handle_stream(
 
     // Capture what we need to save to store after streaming completes
     let store = state.store.clone();
+    let metrics = state.metrics.clone();
     let req_json = serde_json::to_value(&_req).unwrap_or_default();
     let sent_messages = chat_req.messages.clone();
 
@@ -424,6 +443,8 @@ async fn handle_stream(
             response_json: response_body,
             canonical_messages: canonical,
         });
+        metrics.set_store_size(store.len());
+        metrics.record_request_completed(stream_state.final_usage());
     });
 
     let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -446,6 +467,7 @@ pub async fn delete_response(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
     if state.store.delete(&id) {
+        state.metrics.set_store_size(state.store.len());
         Ok(Json(serde_json::json!({"id": id, "deleted": true})))
     } else {
         Err(to_status_json(&ApiError::response_not_found(&id)))
@@ -485,6 +507,11 @@ async fn handle_native_responses(
     canonical: CanonicalRequest,
     resolved_model: String,
 ) -> Result<axum::response::Response, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    let metrics = state.metrics.clone();
+    let record_error = |e: ApiError| {
+        metrics.record_request_error(e.error.message.clone());
+        to_status_json(&e)
+    };
     let mut body = canonical.into_native_responses_json();
     body["model"] = serde_json::Value::String(resolved_model.clone());
 
@@ -496,7 +523,7 @@ async fn handle_native_responses(
         let history = state
             .store
             .get(prev_id)
-            .ok_or_else(|| to_status_json(&ApiError::response_not_found(prev_id)))?;
+            .ok_or_else(|| record_error(ApiError::response_not_found(prev_id)))?;
         let mut input = body["input"].as_array().cloned().unwrap_or_default();
         // Prepend history messages as user/assistant messages
         for msg in history.canonical_messages.iter().rev() {
@@ -510,18 +537,18 @@ async fn handle_native_responses(
         .upstream
         .build_request(reqwest::Method::POST, &state.config.upstream.responses_path)
         .await
-        .map_err(|e| to_status_json(&e))?;
+        .map_err(record_error)?;
 
     let upstream_resp = request_builder
         .json(&body)
         .send()
         .await
-        .map_err(|e| to_status_json(&ApiError::upstream_error(format!("{e}"))))?;
+        .map_err(|e| record_error(ApiError::upstream_error(format!("{e}"))))?;
 
     let status = upstream_resp.status().as_u16();
     if status >= 400 {
         let err_body = upstream_resp.text().await.unwrap_or_default();
-        return Err(to_status_json(&mapper::error_mapper::map_upstream_error(
+        return Err(record_error(mapper::error_mapper::map_upstream_error(
             status, &err_body,
         )));
     }
@@ -533,6 +560,7 @@ async fn handle_native_responses(
             Result<protocol::sse::ResponseSseEvent, std::convert::Infallible>,
         >(64);
         let store = state.store.clone();
+        let metrics = state.metrics.clone();
         let req_json = serde_json::to_value(&canonical).unwrap_or_default();
         let resolved = resolved_model.clone();
 
@@ -599,6 +627,12 @@ async fn handle_native_responses(
                 response_json: response_body.clone(),
                 canonical_messages: canonical_msgs_for_store,
             });
+            metrics.set_store_size(store.len());
+            let usage = serde_json::from_value::<protocol::common::Usage>(
+                response_body.get("usage").cloned().unwrap_or_default(),
+            )
+            .ok();
+            metrics.record_request_completed(usage.as_ref());
         });
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -609,7 +643,7 @@ async fn handle_native_responses(
         let response_body: serde_json::Value = upstream_resp
             .json()
             .await
-            .map_err(|e| to_status_json(&ApiError::upstream_error(format!("{e}"))))?;
+            .map_err(|e| record_error(ApiError::upstream_error(format!("{e}"))))?;
 
         let response_id = response_body["id"]
             .as_str()
@@ -638,6 +672,10 @@ async fn handle_native_responses(
             response_json: response_body.clone(),
             canonical_messages: canonical_msgs,
         });
+        state.metrics.set_store_size(state.store.len());
+        let usage =
+            serde_json::from_value::<protocol::common::Usage>(response_body["usage"].clone()).ok();
+        state.metrics.record_request_completed(usage.as_ref());
 
         Ok(Json(response_body).into_response())
     }

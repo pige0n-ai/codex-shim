@@ -872,7 +872,7 @@ fn resolve_catalog_path(codex_home: &Path, catalog_path: Option<&str>) -> anyhow
                 codex_home.join(path)
             }
         }
-        None => codex_home.join("codex-shim").join("model-catalog.json"),
+        None => codex_home.join("model-catalog-shim.json"),
     };
     absolutize(&candidate)
 }
@@ -1554,7 +1554,7 @@ logging:
     #[test]
     fn merge_codex_config_writes_top_level_catalog_pointer() {
         let mut doc = DocumentMut::new();
-        let catalog = Path::new("/tmp/codex/model-catalog.json");
+        let catalog = Path::new("/tmp/codex/model-catalog-shim.json");
 
         merge_codex_config_document(
             &mut doc,
@@ -1571,7 +1571,7 @@ logging:
         assert_eq!(doc["model"].as_str(), Some("deepseek-v4-pro"));
         assert_eq!(
             doc["model_catalog_json"].as_str(),
-            Some("/tmp/codex/model-catalog.json")
+            Some("/tmp/codex/model-catalog-shim.json")
         );
         assert_eq!(doc["web_search"].as_str(), Some("disabled"));
         assert_eq!(
@@ -1602,7 +1602,7 @@ name = "Other"
             &mut doc,
             "codex_shim",
             "deepseek-v4-pro",
-            Path::new("/tmp/codex/model-catalog.json"),
+            Path::new("/tmp/codex/model-catalog-shim.json"),
             "http://127.0.0.1:8787/v1",
             Some("LOCAL_SHIM_TOKEN"),
             None,
@@ -1630,7 +1630,7 @@ model_catalog_json = "/wrong/place.json"
             &mut doc,
             "codex_shim",
             "deepseek-v4-pro",
-            Path::new("/tmp/codex/model-catalog.json"),
+            Path::new("/tmp/codex/model-catalog-shim.json"),
             "http://127.0.0.1:8787/v1",
             Some("LOCAL_SHIM_TOKEN"),
             None,
@@ -1644,7 +1644,7 @@ model_catalog_json = "/wrong/place.json"
         );
         assert_eq!(
             doc["model_catalog_json"].as_str(),
-            Some("/tmp/codex/model-catalog.json")
+            Some("/tmp/codex/model-catalog-shim.json")
         );
     }
 
@@ -1661,7 +1661,7 @@ command = "/bin/true"
             &mut doc,
             "codex_shim",
             "deepseek-v4-pro",
-            Path::new("/tmp/codex/model-catalog.json"),
+            Path::new("/tmp/codex/model-catalog-shim.json"),
             "http://127.0.0.1:8787/v1",
             Some("LOCAL_SHIM_TOKEN"),
             None,
@@ -1686,10 +1686,7 @@ command = "/bin/true"
             .join("fixtures")
             .join("codex-home");
         let path = resolve_catalog_path(&codex_home, None).expect("default catalog path");
-        assert_eq!(
-            path,
-            codex_home.join("codex-shim").join("model-catalog.json")
-        );
+        assert_eq!(path, codex_home.join("model-catalog-shim.json"));
     }
 
     #[test]
@@ -1700,7 +1697,7 @@ command = "/bin/true"
             &mut doc,
             "codex_shim",
             "deepseek-v4-pro",
-            Path::new("/tmp/codex/model-catalog.json"),
+            Path::new("/tmp/codex/model-catalog-shim.json"),
             "http://127.0.0.1:8787/v1",
             None,
             None,
