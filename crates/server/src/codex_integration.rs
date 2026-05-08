@@ -1037,11 +1037,14 @@ name = "Other"
         .expect("preview");
 
         assert_eq!(preview.mode, "project");
-        assert!(preview.target_path.ends_with(".codex/config.toml"));
-        assert!(
-            preview
-                .catalog_path
-                .ends_with(".codex/model-catalog-shim.json")
+        assert_eq!(
+            PathBuf::from(&preview.target_path),
+            absolutize(&project_dir.join(".codex").join("config.toml")).expect("target path")
+        );
+        assert_eq!(
+            PathBuf::from(&preview.catalog_path),
+            absolutize(&project_dir.join(".codex").join("model-catalog-shim.json"))
+                .expect("catalog path")
         );
         assert!(preview.trust_target_path.is_some());
     }
