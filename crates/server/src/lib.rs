@@ -4,13 +4,16 @@ use axum::{Router, middleware::from_fn, routing::get, routing::post};
 use tokio::time::Duration;
 
 use crate::config::Config;
+use crate::runtime_metrics::RuntimeMetrics;
 use crate::store::ResponseStore;
 use crate::upstream::UpstreamClient;
 use providers::ProviderProfile;
 
 mod auth;
+pub mod codex_integration;
 pub mod config;
 mod routes;
+pub mod runtime_metrics;
 mod sse_writer;
 mod store;
 mod upstream;
@@ -22,10 +25,16 @@ pub struct AppState {
     pub store: Arc<ResponseStore>,
     pub upstream: Arc<UpstreamClient>,
     pub profile: Arc<dyn ProviderProfile>,
+    pub metrics: Arc<RuntimeMetrics>,
 }
 
 /// Build the Axum application.
 pub fn app(config: Config) -> anyhow::Result<Router> {
+    app_with_metrics(config, Arc::new(RuntimeMetrics::default()))
+}
+
+/// Build the Axum application with a shared runtime metrics collector.
+pub fn app_with_metrics(config: Config, metrics: Arc<RuntimeMetrics>) -> anyhow::Result<Router> {
     config.validate()?;
     let store_backend: Box<dyn crate::store::ResponseStoreBackend> =
         match config.state.backend.as_str() {
@@ -66,23 +75,28 @@ pub fn app(config: Config) -> anyhow::Result<Router> {
 
     // Spawn background cleanup task
     let cleanup_store = store.clone();
+    let cleanup_metrics = metrics.clone();
     let cleanup_interval = config.state.cleanup_interval_seconds;
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(cleanup_interval));
         loop {
             interval.tick().await;
             let removed = cleanup_store.cleanup_expired();
+            cleanup_metrics.set_store_size(cleanup_store.len());
             if removed > 0 {
                 tracing::info!(removed, "Cleaned up expired responses");
             }
         }
     });
 
+    metrics.set_store_size(store.len());
+
     let state = AppState {
         config: Arc::new(config),
         store,
         upstream,
         profile,
+        metrics,
     };
 
     let auth_config: &'static _ = {

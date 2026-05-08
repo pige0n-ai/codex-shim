@@ -163,6 +163,10 @@ impl StreamState {
         Ok(events)
     }
 
+    pub fn final_usage(&self) -> Option<&protocol::common::Usage> {
+        self.final_usage.as_ref()
+    }
+
     /// Emit the final completion lifecycle events once the upstream stream ends.
     pub fn complete(&mut self) -> Vec<ResponseSseEvent> {
         if self.completed_sent {
