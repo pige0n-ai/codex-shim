@@ -36,6 +36,9 @@ Codex startup catalog and provider config for you.
 If you want the fastest post-download setup path, or a full explanation of how
 `profile_config`, `models.catalog`, and Codex's `config.toml` fit together, see
 [docs/configuration.md](/home/vivec/codex-shim/docs/configuration.md).
+For the Codex desktop app contract, including trusted project setup and
+history/resume boundaries, see
+[docs/desktop.md](/home/vivec/codex-shim/docs/desktop.md).
 
 ### Use A Release Binary
 
@@ -296,6 +299,11 @@ For the full walkthrough, field guide, and precedence rules, see
    - `server.base_path` must remain `/v1`
    - `features.*` in shim YAML is rejected at startup
    - `models.catalog` must be present so `/models` can be served natively
+
+9. **Desktop support is project-scoped**:
+   - use project `.codex/config.toml` plus a trusted project entry for the Codex desktop app
+   - shim-managed history/resume guarantees only apply to threads created under that stable `codex_shim` provider identity
+   - old non-shim desktop threads remain a gated compatibility case; see [docs/desktop.md](/home/vivec/codex-shim/docs/desktop.md)
 
 ## CLI
 

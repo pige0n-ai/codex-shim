@@ -10,6 +10,10 @@ The short version is:
 3. Do not touch `profile_config` unless you are intentionally overriding a
    built-in provider preset.
 
+If you are targeting the Codex desktop app instead of only the CLI, also read
+[docs/desktop.md](/home/vivec/codex-shim/docs/desktop.md). Desktop support has a
+stricter project/trust contract than the basic CLI flow.
+
 The sections below start with the 5-minute setup flow, then explain the config
 layers and precedence rules in more detail.
 
@@ -138,6 +142,29 @@ That command writes:
 For a first setup, keep the Codex `model` equal to the shim `models.default`.
 You only need `--model ...` when the same shim YAML advertises more than one
 catalog entry and you want a different default.
+
+For the Codex desktop app, prefer the project-scoped install flow instead:
+
+```bash
+./codex-shim install-codex-config \
+  --config /absolute/path/to/config.yaml \
+  --project-dir /absolute/path/to/repo \
+  --trust-project
+```
+
+That writes:
+
+- `<repo>/.codex/config.toml`
+- `<repo>/.codex/codex-shim/model-catalog.json`
+- a trusted-project entry in the global Codex config when `--trust-project` is used
+
+Validate the desktop wiring with:
+
+```bash
+./codex-shim doctor desktop \
+  --config /absolute/path/to/config.yaml \
+  --project-dir /absolute/path/to/repo
+```
 
 ### 7. Run Codex
 
