@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0"
+    />
+    <title>Codex-Shim</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="desktop">
+      <section class="window main-window">
+        <div class="title-bar">
+          <div class="title-bar-text">Codex-Shim Standard Edition</div>
+          <div class="title-bar-extra" id="title-status">Stopped</div>
+        </div>
+
+        <div class="command-bar">
+          <div class="command-buttons">
+            <button class="win-btn" id="start-btn">Start</button>
+            <button class="win-btn" id="stop-btn">Stop</button>
+            <button class="win-btn primary" id="restart-btn">Restart</button>
+            <button class="win-btn" id="settings-btn">Settings...</button>
+            <button class="win-btn" id="doctor-btn">Doctor...</button>
+          </div>
+
+          <div class="command-status">
+            <div class="status-chip" id="status-chip">
+              <span class="status-square"></span>
+              <span id="status-label">Stopped</span>
+            </div>
+            <div class="inset-field command-readout" id="listen-label">Not running</div>
+          </div>
+        </div>
+
+        <div class="workspace-grid">
+          <section class="monitor-column">
+            <div class="panel">
+              <div class="panel-title">Runtime Summary</div>
+              <div class="summary-grid">
+                <div class="summary-item">
+                  <div class="summary-label">Provider</div>
+                  <div class="summary-value" id="runtime-provider">—</div>
+                </div>
+                <div class="summary-item">
+                  <div class="summary-label">Model</div>
+                  <div class="summary-value" id="runtime-model">—</div>
+                </div>
+                <div class="summary-item">
+                  <div class="summary-label">Endpoint</div>
+                  <div class="summary-value" id="runtime-endpoint">—</div>
+                </div>
+                <div class="summary-item">
+                  <div class="summary-label">State</div>
+                  <div class="summary-value" id="runtime-backend">—</div>
+                </div>
+                <div class="summary-item wide">
+                  <div class="summary-label">Upstream</div>
+                  <div class="summary-value mono" id="runtime-upstream">—</div>
+                </div>
+                <div class="summary-item wide">
+                  <div class="summary-label">Listen</div>
+                  <div class="summary-value mono" id="runtime-listen">—</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-title">Counters</div>
+              <div class="stats-grid">
+                <div class="stat-panel">
+                  <div class="stat-label">Requests</div>
+                  <div class="stat-value" id="request-count">0</div>
+                </div>
+                <div class="stat-panel">
+                  <div class="stat-label">Completed</div>
+                  <div class="stat-value" id="completed-count">0</div>
+                </div>
+                <div class="stat-panel">
+                  <div class="stat-label">Store Items</div>
+                  <div class="stat-value" id="store-count">0</div>
+                </div>
+                <div class="stat-panel">
+                  <div class="stat-label">Errors</div>
+                  <div class="stat-value error" id="error-count">0</div>
+                </div>
+              </div>
+
+              <div class="info-strip">
+                <div class="inset-field info-field">
+                  <span class="summary-label">Uptime</span>
+                  <span class="info-value" id="runtime-uptime">0m uptime</span>
+                </div>
+                <div class="inset-field info-field alert-field">
+                  <span class="summary-label">Last Error</span>
+                  <span class="info-value mono" id="last-error-field">None</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="panel chart-panel">
+              <div class="chart-header">
+                <div>
+                  <div class="panel-title compact">Token Throughput</div>
+                  <div class="subtle-copy">Completed requests only. No estimated usage.</div>
+                </div>
+
+                <div class="chart-controls">
+                  <div class="status-note hidden" id="partial-usage-badge">Partial usage</div>
+                  <div class="button-strip">
+                    <button class="win-btn range-btn" data-range="15">15m</button>
+                    <button class="win-btn range-btn active" data-range="60">1h</button>
+                    <button class="win-btn range-btn" data-range="1440">24h</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="chart-stage">
+                <svg id="token-chart" viewBox="0 0 560 228" preserveAspectRatio="none"></svg>
+                <div class="chart-empty hidden" id="chart-empty">No token usage yet.</div>
+              </div>
+
+              <div class="chart-footer">
+                <div id="chart-window-label">Showing last 1 hour.</div>
+                <div id="chart-last-sample">No samples.</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel logs-column">
+            <div class="panel-title">Log Console</div>
+
+            <div class="log-toolbar">
+              <input id="log-search" class="text-input" type="search" placeholder="Filter logs" />
+              <button class="win-btn" id="pause-logs-btn">Pause Stream</button>
+              <button class="win-btn" id="export-logs-btn">Export</button>
+            </div>
+
+            <div class="filter-row">
+              <label class="filter-check">
+                <input id="filter-info" type="checkbox" data-level="INFO" checked />
+                <span>INFO</span>
+              </label>
+              <label class="filter-check">
+                <input id="filter-warn" type="checkbox" data-level="WARN" checked />
+                <span>WARN</span>
+              </label>
+              <label class="filter-check">
+                <input id="filter-error" type="checkbox" data-level="ERROR" checked />
+                <span>ERROR</span>
+              </label>
+              <label class="filter-check">
+                <input id="filter-debug" type="checkbox" data-level="DEBUG" />
+                <span>DEBUG</span>
+              </label>
+            </div>
+
+            <div class="log-stream" id="log-stream"></div>
+
+            <div class="log-footer">
+              <label class="filter-check">
+                <input id="auto-scroll-toggle" type="checkbox" checked />
+                <span>Auto-scroll</span>
+              </label>
+              <div id="log-count">0 entries</div>
+            </div>
+          </section>
+        </div>
+
+        <div class="status-bar">
+          <div class="status-cell status-message" id="status-message">Ready.</div>
+          <div class="status-cell" id="integration-status">Codex integration: no preview</div>
+          <div class="status-cell mono" id="active-config-path">No config loaded</div>
+        </div>
+      </section>
+
+      <div class="dialog-shell hidden" id="settings-shell">
+        <section class="window dialog-window settings-window">
+          <div class="title-bar">
+            <div class="title-bar-text">Properties</div>
+            <button class="title-close" id="settings-close-title-btn" aria-label="Close settings">X</button>
+          </div>
+
+          <div class="tab-row">
+            <button class="tab-button active" data-settings-tab="general">General</button>
+            <button class="tab-button" data-settings-tab="models">Models</button>
+            <button class="tab-button" data-settings-tab="yaml">YAML Editor</button>
+            <button class="tab-button" data-settings-tab="integration">Integration</button>
+          </div>
+
+          <div class="dialog-body">
+            <section class="tab-panel active" data-settings-panel="general">
+              <div class="general-layout">
+                <div class="field-stack">
+                  <label class="field-group">
+                    <span class="field-label">Config path</span>
+                    <div class="inline-field-row">
+                      <input id="config-path" class="text-input" type="text" placeholder="/path/to/config.yaml" />
+                      <button class="win-btn" id="browse-config-btn">Browse...</button>
+                      <button class="win-btn" id="load-config-btn">Load</button>
+                    </div>
+                  </label>
+
+                  <label class="field-group">
+                    <span class="field-label">Project directory</span>
+                    <div class="inline-field-row">
+                      <input id="project-dir" class="text-input" type="text" placeholder="/path/to/repo" />
+                      <button class="win-btn" id="browse-project-dir-btn">Browse...</button>
+                    </div>
+                  </label>
+
+                  <label class="field-group">
+                    <span class="field-label">CODEX_HOME</span>
+                    <div class="inline-field-row">
+                      <input id="codex-home" class="text-input" type="text" placeholder="/path/to/.codex" />
+                      <button class="win-btn" id="browse-codex-home-btn">Browse...</button>
+                    </div>
+                  </label>
+
+                  <div class="two-column-fields">
+                    <label class="field-group">
+                      <span class="field-label">Shim auth env key</span>
+                      <input id="env-key" class="text-input" type="text" placeholder="LOCAL_SHIM_TOKEN" />
+                    </label>
+                  </div>
+
+                  <div class="section-divider" aria-hidden="true"></div>
+
+                  <div class="field-group">
+                    <span class="field-label">Write target</span>
+                    <label class="radio-row">
+                      <input id="target-scope-project" type="radio" name="target-scope" value="project" checked />
+                      <span>Project-level `.codex/config.toml`</span>
+                    </label>
+                    <label class="radio-row">
+                      <input id="target-scope-user" type="radio" name="target-scope" value="user" />
+                      <span>User-level `$CODEX_HOME/config.toml`</span>
+                    </label>
+                    <label class="filter-check">
+                      <input id="trust-project" type="checkbox" />
+                      <span>Trust project on apply</span>
+                    </label>
+                  </div>
+
+                  <div class="info-box surface-stack">
+                    <div class="section-label">Codex Features</div>
+                    <div class="capability-grid">
+                      <div class="capability-item">
+                        <span>web_search</span>
+                        <span class="capability-value" id="surface-web-search-capability">—</span>
+                      </div>
+                      <div class="capability-item">
+                        <span>Search advertised</span>
+                        <span class="capability-value" id="surface-search-capability">—</span>
+                      </div>
+                      <div class="capability-item">
+                        <span>Parallel tool calls</span>
+                        <span class="capability-value" id="surface-parallel-capability">—</span>
+                      </div>
+                      <div class="capability-item">
+                        <span>Reasoning summaries</span>
+                        <span class="capability-value" id="surface-summary-capability">—</span>
+                      </div>
+                      <div class="capability-item">
+                        <span>Image detail = original</span>
+                        <span class="capability-value" id="surface-image-capability">—</span>
+                      </div>
+                      <div class="capability-item">
+                        <span>Apply patch tool</span>
+                        <span class="capability-value" id="surface-patch-capability">—</span>
+                      </div>
+                      <div class="capability-item">
+                        <span>Reasoning levels</span>
+                        <span class="capability-value" id="surface-reasoning-capability">—</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="side-stack">
+                  <div class="info-box scroll-box">
+                    <div class="section-label">Current Shim</div>
+                    <dl class="kv-grid">
+                      <div>
+                        <dt>Provider</dt>
+                        <dd id="general-provider">—</dd>
+                      </div>
+                      <div>
+                        <dt>Model</dt>
+                        <dd id="general-model">—</dd>
+                      </div>
+                      <div>
+                        <dt>Endpoint</dt>
+                        <dd id="general-endpoint">—</dd>
+                      </div>
+                      <div>
+                        <dt>Backend</dt>
+                        <dd id="general-backend">—</dd>
+                      </div>
+                      <div>
+                        <dt>Listen</dt>
+                        <dd><input class="text-input readout-input mono" id="general-listen" type="text" readonly value="—" /></dd>
+                      </div>
+                      <div>
+                        <dt>Upstream</dt>
+                        <dd><input class="text-input readout-input mono" id="general-upstream" type="text" readonly value="—" /></dd>
+                      </div>
+                    </dl>
+                  </div>
+
+                  <div class="info-box scroll-box">
+                    <div class="section-label">Codex Targets</div>
+                    <dl class="kv-grid">
+                      <div>
+                        <dt>Target TOML</dt>
+                        <dd><input class="text-input readout-input mono" id="toml-target-path" type="text" readonly value="—" /></dd>
+                      </div>
+                      <div>
+                        <dt>Catalog JSON</dt>
+                        <dd><input class="text-input readout-input mono" id="catalog-target-path" type="text" readonly value="—" /></dd>
+                      </div>
+                      <div>
+                        <dt>Write scope</dt>
+                        <dd id="general-write-scope">Project (.codex)</dd>
+                      </div>
+                      <div>
+                        <dt>Apply state</dt>
+                        <dd id="general-apply-state">No preview</dd>
+                      </div>
+                    </dl>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="tab-panel" data-settings-panel="models">
+              <div class="dialog-toolbar compact-toolbar">
+                <div id="models-count">0 models</div>
+                <div class="inset-field command-readout" id="models-default-label">Default: —</div>
+              </div>
+
+              <div class="models-layout">
+                <div class="table-wrap">
+                  <table class="data-table">
+                    <thead>
+                      <tr>
+                        <th>Model</th>
+                        <th>Context</th>
+                        <th>Reasoning</th>
+                        <th>Modalities</th>
+                      </tr>
+                    </thead>
+                    <tbody id="models-table-body"></tbody>
+                  </table>
+                </div>
+
+                <div class="detail-panel">
+                  <div class="section-label" id="model-detail-title">No model selected</div>
+                  <dl class="detail-list" id="model-detail-list"></dl>
+                  <pre class="json-preview" id="model-detail-json"></pre>
+                </div>
+              </div>
+            </section>
+
+            <section class="tab-panel" data-settings-panel="yaml">
+              <div class="editor-frame">
+                <div class="editor-toolbar">
+                  <div class="section-label">Raw shim YAML</div>
+                </div>
+                <textarea id="shim-editor" class="code-editor yaml-editor" spellcheck="false"></textarea>
+              </div>
+            </section>
+
+            <section class="tab-panel" data-settings-panel="integration">
+              <div class="integration-meta">
+                <div class="inset-field meta-box">
+                  <span class="field-label">Target TOML</span>
+                  <input class="text-input readout-input mono" id="integration-toml-target" type="text" readonly value="—" />
+                </div>
+                <div class="inset-field meta-box">
+                  <span class="field-label">Catalog JSON</span>
+                  <input class="text-input readout-input mono" id="integration-catalog-target" type="text" readonly value="—" />
+                </div>
+              </div>
+
+              <div class="integration-grid">
+                <div class="editor-frame">
+                  <div class="section-label">Base TOML</div>
+                  <textarea id="toml-base-editor" class="code-editor toml-editor" spellcheck="false"></textarea>
+                </div>
+
+                <div class="editor-frame">
+                  <div class="section-label">Resulting TOML</div>
+                  <div id="merged-preview" class="merged-preview"></div>
+                </div>
+              </div>
+
+              <div class="inline-note" id="integration-summary">No merged preview yet.</div>
+            </section>
+          </div>
+
+          <div class="dialog-actions">
+            <button class="win-btn hidden" id="save-config-btn">Save YAML</button>
+            <div class="dialog-spacer"></div>
+            <button class="win-btn" id="settings-close-btn">Close</button>
+            <button class="win-btn primary" id="apply-btn">Apply</button>
+          </div>
+        </section>
+      </div>
+
+      <div class="dialog-shell hidden" id="doctor-shell">
+        <section class="window dialog-window doctor-window">
+          <div class="title-bar">
+            <div class="title-bar-text">Desktop Doctor</div>
+            <button class="title-close" id="doctor-close-title-btn" aria-label="Close doctor">X</button>
+          </div>
+
+          <div class="dialog-body">
+            <div class="dialog-toolbar">
+              <div id="doctor-summary">Run doctor against the current Codex integration target.</div>
+              <button class="win-btn" id="rerun-doctor-btn">Re-run</button>
+            </div>
+
+            <div class="progress-shell hidden" id="doctor-progress">
+              <div class="progress-track">
+                <div class="progress-bar"></div>
+              </div>
+            </div>
+
+            <div class="table-wrap doctor-table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Component</th>
+                    <th>Status</th>
+                    <th>Details</th>
+                  </tr>
+                </thead>
+                <tbody id="doctor-table-body"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="dialog-actions">
+            <div class="dialog-spacer"></div>
+            <button class="win-btn" id="doctor-close-btn">Close</button>
+          </div>
+        </section>
+      </div>
+
+      <div class="dialog-shell hidden" id="confirm-shell">
+        <section class="window dialog-window confirm-window">
+          <div class="title-bar">
+            <div class="title-bar-text" id="confirm-title">Confirm</div>
+            <button class="title-close" id="confirm-close-btn" aria-label="Close confirm dialog">X</button>
+          </div>
+
+          <div class="dialog-body confirm-body">
+            <div id="confirm-message">Confirm the requested change.</div>
+            <div class="subtle-copy" id="confirm-detail"></div>
+          </div>
+
+          <div class="dialog-actions">
+            <div class="dialog-spacer"></div>
+            <button class="win-btn" id="confirm-cancel-btn">Cancel</button>
+            <button class="win-btn primary" id="confirm-ok-btn">OK</button>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

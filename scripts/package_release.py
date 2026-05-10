@@ -37,6 +37,7 @@ def main() -> int:
     parser.add_argument("--target", required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--name", default="codex-shim")
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parent.parent
@@ -48,7 +49,7 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     package_name = (
-        f"codex-shim-{sanitize_segment(args.version)}-"
+        f"{sanitize_segment(args.name)}-{sanitize_segment(args.version)}-"
         f"{sanitize_segment(args.target)}"
     )
     with tempfile.TemporaryDirectory() as temp_dir:

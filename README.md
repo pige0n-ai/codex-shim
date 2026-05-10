@@ -72,7 +72,7 @@ $env:DEEPSEEK_API_KEY = "sk-..."
 
 The install command writes:
 
-- `$CODEX_HOME/codex-shim/model-catalog.json`
+- `$CODEX_HOME/model-catalog-shim.json`
 - `$CODEX_HOME/config.toml`
 - `$CODEX_HOME/config.toml.bak.0` ... `.bak.3` rolling backups when `config.toml` already exists
 
@@ -93,27 +93,21 @@ export DEEPSEEK_API_KEY="sk-..."
 ./target/release/codex-shim --config examples/deepseek-chat/config.yaml
 ```
 
-### Codex Desktop App
+## GUI Beta
 
-For desktop app use, prefer a project-scoped install instead of only updating
-`$CODEX_HOME/config.toml`:
+A lightweight desktop GUI shell now lives under
+[gui/README.md](/home/vivec/codex-shim/gui/README.md).
 
-```bash
-./target/release/codex-shim install-codex-config \
-  --config ~/.codex-shim/config.yaml \
-  --project-dir /absolute/path/to/repo \
-  --trust-project
+Its scope is intentionally narrow:
 
-./target/release/codex-shim doctor desktop \
-  --config ~/.codex-shim/config.yaml \
-  --project-dir /absolute/path/to/repo
-```
+- runtime status
+- token usage curve
+- live logs
+- a gear-driven configuration drawer for shim YAML and Codex TOML integration
 
-Desktop support is intentionally scoped:
-
-- supported: trusted project config, stable `codex_shim` provider identity, shim-managed history/resume
-- gated: old non-shim desktop threads restoring their original provider context
-- unsupported: multi-upstream-in-one-provider setups and fake hosted-tool compatibility through chat-shim paths
+The GUI uses `Tauri v2` with a static HTML/CSS/JS frontend. It does not need a
+Node-based frontend build step, but Linux builds still require the usual
+GTK/WebKit system packages that Tauri depends on.
 
 ## Codex Provider Config
 
@@ -130,7 +124,7 @@ If you want to inspect or hand-edit the result, the important shape is:
 ```toml
 model_provider = "codex_shim"
 model = "deepseek-v4-pro"
-model_catalog_json = "/absolute/path/to/$CODEX_HOME/codex-shim/model-catalog.json"
+model_catalog_json = "/absolute/path/to/$CODEX_HOME/model-catalog-shim.json"
 
 # Most shim profiles ultimately target Chat Completions upstreams, so hosted
 # web search should start disabled. If you use a native Responses provider that

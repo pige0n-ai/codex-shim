@@ -16,6 +16,9 @@ models:
   catalog:
     - slug: "accounts/fireworks/models/qwen3-235b-a22b"
       context_window: 131072
+      reasoning_levels:
+        - xhigh
+        - high
 state:
   backend: memory
 logging:
