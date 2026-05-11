@@ -9,7 +9,7 @@ use crate::common::ContentPart;
 use crate::error::ApiError;
 use crate::provider_caps::{ProviderCapabilities, ReasoningPolicy, ToolPolicy};
 use crate::responses::{
-    InputItem, InputMessageRole, MessageContent, ResponseInput, ResponseTool, NamespaceTool,
+    InputItem, InputMessageRole, MessageContent, NamespaceTool, ResponseInput, ResponseTool,
     ResponsesCreateRequest, TextFormat, ToolChoice as ResponsesToolChoice,
 };
 
@@ -854,7 +854,9 @@ pub fn flatten_response_tools(tools: &[ResponseTool]) -> Vec<ResponseTool> {
     let mut flattened = Vec::new();
     for tool in tools {
         match tool {
-            ResponseTool::Namespace { tools: inner_tools, .. } => {
+            ResponseTool::Namespace {
+                tools: inner_tools, ..
+            } => {
                 for inner in inner_tools {
                     match inner {
                         NamespaceTool::Function {
@@ -878,7 +880,6 @@ pub fn flatten_response_tools(tools: &[ResponseTool]) -> Vec<ResponseTool> {
     }
     flattened
 }
-
 
 fn parse_tools(
     tools: &[ResponseTool],

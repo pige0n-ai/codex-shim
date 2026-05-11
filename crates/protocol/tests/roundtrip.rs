@@ -342,7 +342,11 @@ mod tests {
         }"#;
         let tool: ResponseTool = serde_json::from_str(json).unwrap();
         match tool {
-            ResponseTool::Namespace { ref name, ref description, ref tools } => {
+            ResponseTool::Namespace {
+                ref name,
+                ref description,
+                ref tools,
+            } => {
                 assert_eq!(name, "mcp__rmcp");
                 assert_eq!(description, "Tools in the mcp__rmcp namespace.");
                 assert_eq!(tools.len(), 1);
@@ -369,30 +373,29 @@ mod tests {
         assert!(matches!(tool, ResponseTool::UnknownTool));
     }
 
-}
-
     #[test]
     fn chat_usage_alias_roundtrip() {
-    use protocol::common::Usage;
+        use protocol::common::Usage;
 
-    // Chat Completions naming (prompt_tokens/completion_tokens)
-    let chat_json = r#"{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}"#;
-    let usage: Usage = serde_json::from_str(chat_json).unwrap();
-    assert_eq!(usage.input_tokens, 5);
-    assert_eq!(usage.output_tokens, 3);
-    assert_eq!(usage.total_tokens, 8);
+        // Chat Completions naming (prompt_tokens/completion_tokens)
+        let chat_json = r#"{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}"#;
+        let usage: Usage = serde_json::from_str(chat_json).unwrap();
+        assert_eq!(usage.input_tokens, 5);
+        assert_eq!(usage.output_tokens, 3);
+        assert_eq!(usage.total_tokens, 8);
 
-    // Responses naming (input_tokens/output_tokens)
-    let resp_json = r#"{"input_tokens":10,"output_tokens":7,"total_tokens":17}"#;
-    let usage: Usage = serde_json::from_str(resp_json).unwrap();
-    assert_eq!(usage.input_tokens, 10);
-    assert_eq!(usage.output_tokens, 7);
-    assert_eq!(usage.total_tokens, 17);
+        // Responses naming (input_tokens/output_tokens)
+        let resp_json = r#"{"input_tokens":10,"output_tokens":7,"total_tokens":17}"#;
+        let usage: Usage = serde_json::from_str(resp_json).unwrap();
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.total_tokens, 17);
 
-    // Serialize back uses Responses naming
-    let out = serde_json::to_value(&usage).unwrap();
-    assert_eq!(out["input_tokens"], 10);
-    assert_eq!(out["output_tokens"], 7);
-    assert!(out.get("prompt_tokens").is_none());
-    assert!(out.get("completion_tokens").is_none());
+        // Serialize back uses Responses naming
+        let out = serde_json::to_value(&usage).unwrap();
+        assert_eq!(out["input_tokens"], 10);
+        assert_eq!(out["output_tokens"], 7);
+        assert!(out.get("prompt_tokens").is_none());
+        assert!(out.get("completion_tokens").is_none());
+    }
 }
