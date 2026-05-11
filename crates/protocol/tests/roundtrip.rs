@@ -324,10 +324,55 @@ mod tests {
         let e = protocol::error::ApiError::response_not_found("resp_xxx");
         assert!(e.error.message.contains("resp_xxx"));
     }
+
+    #[test]
+    fn namespace_tool_deserialization() {
+        let json = r#"{
+            "type": "namespace",
+            "name": "mcp__rmcp",
+            "description": "Tools in the mcp__rmcp namespace.",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "echo",
+                    "description": "Echo back the input",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            ]
+        }"#;
+        let tool: ResponseTool = serde_json::from_str(json).unwrap();
+        match tool {
+            ResponseTool::Namespace { ref name, ref description, ref tools } => {
+                assert_eq!(name, "mcp__rmcp");
+                assert_eq!(description, "Tools in the mcp__rmcp namespace.");
+                assert_eq!(tools.len(), 1);
+                match &tools[0] {
+                    NamespaceTool::Function { name, .. } => {
+                        assert_eq!(name, "echo");
+                    }
+                }
+            }
+            _ => panic!("Expected Namespace variant"),
+        }
+
+        // Verify roundtrip serialization preserves structure
+        let serialized = serde_json::to_value(&tool).unwrap();
+        assert_eq!(serialized["type"], "namespace");
+        assert_eq!(serialized["name"], "mcp__rmcp");
+        assert_eq!(serialized["tools"][0]["type"], "function");
+    }
+
+    #[test]
+    fn unknown_tool_still_deserializes() {
+        let json = r#"{"type": "some_future_type", "foo": "bar"}"#;
+        let tool: ResponseTool = serde_json::from_str(json).unwrap();
+        assert!(matches!(tool, ResponseTool::UnknownTool));
+    }
+
 }
 
-#[test]
-fn chat_usage_alias_roundtrip() {
+    #[test]
+    fn chat_usage_alias_roundtrip() {
     use protocol::common::Usage;
 
     // Chat Completions naming (prompt_tokens/completion_tokens)

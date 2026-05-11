@@ -9,7 +9,7 @@ use crate::common::ContentPart;
 use crate::error::ApiError;
 use crate::provider_caps::{ProviderCapabilities, ReasoningPolicy, ToolPolicy};
 use crate::responses::{
-    InputItem, InputMessageRole, MessageContent, ResponseInput, ResponseTool,
+    InputItem, InputMessageRole, MessageContent, ResponseInput, ResponseTool, NamespaceTool,
     ResponsesCreateRequest, TextFormat, ToolChoice as ResponsesToolChoice,
 };
 
@@ -435,9 +435,9 @@ impl CanonicalRequest {
             req["top_p"] =
                 Value::Number(serde_json::Number::from_f64(t as f64).unwrap_or(0.into()));
         }
-        if !self.response_tools_raw.is_empty() {
-            req["tools"] = self
-                .response_tools_raw
+        let flattened_tools: Vec<ResponseTool> = flatten_response_tools(&self.response_tools_raw);
+        if !flattened_tools.is_empty() {
+            req["tools"] = flattened_tools
                 .iter()
                 .map(|t| serde_json::to_value(t).unwrap_or(serde_json::Value::Null))
                 .collect();
@@ -847,12 +847,45 @@ fn extract_reasoning_text(
     String::new()
 }
 
+/// Flatten namespace tools into their constituent function tools.
+/// Codex sends MCP/connector tools wrapped in `{"type": "namespace", ...}` envelopes.
+/// The upstream provider expects flat `{"type": "function", ...}` tools.
+pub fn flatten_response_tools(tools: &[ResponseTool]) -> Vec<ResponseTool> {
+    let mut flattened = Vec::new();
+    for tool in tools {
+        match tool {
+            ResponseTool::Namespace { tools: inner_tools, .. } => {
+                for inner in inner_tools {
+                    match inner {
+                        NamespaceTool::Function {
+                            name,
+                            description,
+                            parameters,
+                            strict,
+                        } => {
+                            flattened.push(ResponseTool::Function {
+                                name: name.clone(),
+                                description: description.clone(),
+                                parameters: parameters.clone(),
+                                strict: *strict,
+                            });
+                        }
+                    }
+                }
+            }
+            other => flattened.push(other.clone()),
+        }
+    }
+    flattened
+}
+
+
 fn parse_tools(
     tools: &[ResponseTool],
     warnings: &mut Vec<String>,
 ) -> Result<Vec<CanonicalTool>, String> {
     let mut parsed = Vec::new();
-    for tool in tools {
+    for tool in &flatten_response_tools(tools) {
         match tool {
             ResponseTool::Function {
                 name,
@@ -888,6 +921,8 @@ fn parse_tools(
             ResponseTool::UnknownTool => {
                 return Err(ApiError::unsupported_tool_type("unknown", 0).to_string());
             }
+            // Namespace tools are already flattened by flatten_response_tools
+            ResponseTool::Namespace { .. } => unreachable!(),
         }
     }
     Ok(parsed)

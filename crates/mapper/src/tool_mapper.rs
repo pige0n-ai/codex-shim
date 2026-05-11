@@ -25,7 +25,9 @@ pub fn map_response_tools(tools: &[ResponseTool]) -> Vec<ChatTool> {
             ResponseTool::ComputerUse { .. } => None,
             ResponseTool::FileSearch { .. } => None,
             ResponseTool::WebSearchPreview { .. } => None,
-            ResponseTool::Mcp { .. } | ResponseTool::UnknownTool => None,
+            ResponseTool::Mcp { .. }
+            | ResponseTool::UnknownTool
+            | ResponseTool::Namespace { .. } => None,
         })
         .collect()
 }
