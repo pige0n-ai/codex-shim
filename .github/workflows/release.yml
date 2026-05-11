@@ -4,14 +4,44 @@ on:
   push:
     tags:
       - "v*"
+      - "gui-v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.1.0 or gui-v0.1.0)'
+        required: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  detect:
+    name: Detect release type
+    runs-on: ubuntu-latest
+    outputs:
+      build-gui: ${{ steps.detect.outputs.build-gui }}
+      release-name: ${{ steps.detect.outputs.release-name }}
+      release-tag: ${{ steps.detect.outputs.release-tag }}
+      binary-prefix: ${{ steps.detect.outputs.binary-prefix }}
+    steps:
+      - id: detect
+        run: |
+          TAG="${GITHUB_REF_NAME:-${{ github.event.inputs.tag }}}"
+          if [[ "$TAG" == gui-v* ]]; then
+            echo "build-gui=true" >> "$GITHUB_OUTPUT"
+            echo "release-name=codex-shim-gui ${TAG#gui-}" >> "$GITHUB_OUTPUT"
+            echo "release-tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "binary-prefix=codex-shim-gui" >> "$GITHUB_OUTPUT"
+          else
+            echo "build-gui=false" >> "$GITHUB_OUTPUT"
+            echo "release-name=codex-shim ${TAG}" >> "$GITHUB_OUTPUT"
+            echo "release-tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "binary-prefix=codex-shim" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: Build ${{ matrix.target }}
+    needs: detect
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -19,20 +49,20 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            binary: codex-shim
-            gui_binary: codex-shim-gui
+            cli_bin: codex-shim
+            gui_bin: codex-shim-gui
           - os: macos-15-intel
             target: x86_64-apple-darwin
-            binary: codex-shim
-            gui_binary: codex-shim-gui
+            cli_bin: codex-shim
+            gui_bin: codex-shim-gui
           - os: macos-15
             target: aarch64-apple-darwin
-            binary: codex-shim
-            gui_binary: codex-shim-gui
+            cli_bin: codex-shim
+            gui_bin: codex-shim-gui
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            binary: codex-shim.exe
-            gui_binary: codex-shim-gui.exe
+            cli_bin: codex-shim.exe
+            gui_bin: codex-shim-gui.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -46,7 +76,7 @@ jobs:
           python-version: "3.x"
 
       - name: Install GUI deps (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && needs.detect.outputs.build-gui == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -60,37 +90,46 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build CLI release binary
+      - name: Build CLI
+        if: needs.detect.outputs.build-gui == 'false'
         run: cargo build --release -p codex-shim --target ${{ matrix.target }}
 
-      - name: Build GUI release binary
+      - name: Build GUI
+        if: needs.detect.outputs.build-gui == 'true'
         run: cargo build --release --manifest-path gui/src-tauri/Cargo.toml --target ${{ matrix.target }}
 
-      - name: Package archives
+      - name: Package CLI
+        if: needs.detect.outputs.build-gui == 'false'
         shell: bash
         run: |
           python scripts/package_release.py \
-            --binary "target/${{ matrix.target }}/release/${{ matrix.binary }}" \
+            --binary "target/${{ matrix.target }}/release/${{ matrix.cli_bin }}" \
             --name "codex-shim" \
             --target "${{ matrix.target }}" \
-            --version "${GITHUB_REF_NAME:-dev}" \
+            --version "${{ needs.detect.outputs.release-tag }}" \
             --output-dir dist
+
+      - name: Package GUI
+        if: needs.detect.outputs.build-gui == 'true'
+        shell: bash
+        run: |
           python scripts/package_release.py \
-            --binary "gui/src-tauri/target/${{ matrix.target }}/release/${{ matrix.gui_binary }}" \
+            --binary "gui/src-tauri/target/${{ matrix.target }}/release/${{ matrix.gui_bin }}" \
             --name "codex-shim-gui" \
             --target "${{ matrix.target }}" \
-            --version "${GITHUB_REF_NAME:-dev}" \
+            --version "${{ needs.detect.outputs.release-tag }}" \
             --output-dir dist
 
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.target }}
           path: dist/*
+          if-no-files-found: ignore
 
   publish:
     name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: build
+    needs: [detect, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -100,6 +139,19 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Generate release notes
+        run: |
+          {
+            echo "| Platform | Target |"
+            echo "|----------|--------|"
+            echo "| Linux | x86_64-unknown-linux-gnu |"
+            echo "| macOS Intel | x86_64-apple-darwin |"
+            echo "| macOS Apple Silicon | aarch64-apple-darwin |"
+            echo "| Windows | x86_64-pc-windows-msvc |"
+          } > notes.md
+
       - uses: softprops/action-gh-release@v2
         with:
+          name: ${{ needs.detect.outputs.release-name }}
+          body_path: notes.md
           files: dist/*
