@@ -231,9 +231,8 @@ pub fn apply_codex_integration(
 
         let codex_home = resolve_codex_home(options.codex_home.as_deref())
             .with_context(|| {
-                format!(
-                    "Cannot write project trust entry because CODEX_HOME is not resolvable.                      Set CODEX_HOME environment variable or fill in the CODEX_HOME field in the GUI."
-                )
+                "Cannot write project trust entry because CODEX_HOME is not resolvable.                  Set CODEX_HOME environment variable or fill in the CODEX_HOME field in the GUI."
+                    .to_string()
             })?;
         std::fs::create_dir_all(&codex_home)
             .with_context(|| format!("failed to create CODEX_HOME at {}", codex_home.display()))?;
