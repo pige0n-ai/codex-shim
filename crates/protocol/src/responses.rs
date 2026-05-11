@@ -267,9 +267,30 @@ pub enum ResponseTool {
         #[serde(skip_serializing_if = "Option::is_none")]
         server_description: Option<String>,
     },
+    #[serde(rename = "namespace")]
+    Namespace {
+        name: String,
+        description: String,
+        tools: Vec<NamespaceTool>,
+    },
     /// Catch-all for future/unknown tool types.
     #[serde(other)]
     UnknownTool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum NamespaceTool {
+    #[serde(rename = "function")]
+    Function {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parameters: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        strict: Option<bool>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
