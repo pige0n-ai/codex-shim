@@ -29,60 +29,50 @@ runners for each platform.
 
 ## Quick Start
 
-The intended path is: download a release archive, unpack it, start the shim
-with one bundled example config, then let `codex-shim` inject the matching
-Codex startup catalog and provider config for you.
+### Recommended: Interactive Setup (one command)
 
-If you want the fastest post-download setup path, or a full explanation of how
-`profile_config`, `models.catalog`, and Codex's `config.toml` fit together, see
-[docs/configuration.md](/home/vivec/codex-shim/docs/configuration.md).
-For the Codex desktop app contract, including trusted project setup and
-history/resume boundaries, see
-[docs/desktop.md](/home/vivec/codex-shim/docs/desktop.md).
+```bash
+# Download and unpack a release, then:
+./codex-shim init --setup
+```
 
-### Use A Release Binary
+This interactive wizard will:
 
-1. Download the archive for your platform from
-   [Releases](https://github.com/pige0n-ai/codex-shim/releases/latest).
-2. Unpack it.
-3. Open the unpacked directory; it already contains the binary, `examples/`,
-   `README.md`, and `LICENSE`.
+1. Let you choose from 27 built-in provider profiles
+2. Ask for your API key env var name and default model
+3. Write a minimal `~/.codex-shim/config.yaml`
+4. Generate the Codex startup catalog and update `$CODEX_HOME/config.toml`
+5. Start the shim server on `127.0.0.1:8787`
 
-Linux / macOS:
+After setup, export your upstream API key and restart Codex:
+
+```bash
+export DEEPSEEK_API_KEY="sk-..."
+codex
+```
+
+### Manual Setup (for power users)
+
+If you prefer to start from a bundled example:
 
 ```bash
 tar -xzf codex-shim-<version>-<target>.tar.gz
 cd codex-shim-<version>-<target>
 
+# Copy and edit a bundled example
+cp examples/deepseek-chat/config.yaml ~/.codex-shim/config.yaml
+# Edit ~/.codex-shim/config.yaml to set your model and API key env var
+
+# Validate the config
+./codex-shim validate
+
+# One-shot setup + start
 export DEEPSEEK_API_KEY="sk-..."
-./codex-shim install-codex-config --config examples/deepseek-chat/config.yaml
-./codex-shim --config examples/deepseek-chat/config.yaml
+./codex-shim setup --start
 ```
 
-Windows PowerShell:
-
-```powershell
-Expand-Archive .\codex-shim-<version>-x86_64-pc-windows-msvc.zip
-cd .\codex-shim-<version>-x86_64-pc-windows-msvc
-
-$env:DEEPSEEK_API_KEY = "sk-..."
-.\codex-shim.exe install-codex-config --config .\examples\deepseek-chat\config.yaml
-.\codex-shim.exe --config .\examples\deepseek-chat\config.yaml
-```
-
-The install command writes:
-
-- `$CODEX_HOME/model-catalog-shim.json`
-- `$CODEX_HOME/config.toml`
-- `$CODEX_HOME/config.toml.bak.0` ... `.bak.3` rolling backups when `config.toml` already exists
-
-After that, restart Codex and use it normally:
-
-```bash
-codex
-# or
-codex exec "Explain this repository"
-```
+For the full configuration reference, see [docs/configuration.md](/home/vivec/codex-shim/docs/configuration.md).
+For the Codex desktop app contract, see [docs/desktop.md](/home/vivec/codex-shim/docs/desktop.md).
 
 ### Build From Source
 
@@ -333,9 +323,14 @@ For the full walkthrough, field guide, and precedence rules, see
 codex-shim [OPTIONS] [COMMAND]
 
 Commands:
+  init              Interactive setup wizard (recommended for new users)
+  setup             Validate config, install Codex catalog, optionally start server
+  validate          Check config YAML for correctness
+  install-codex-config  Write Codex startup catalog and update config.toml
   generate-catalog  Generate a model catalog JSON for a provider profile
   explain-catalog   Explain what a model catalog JSON means to Codex
   probe             Probe an upstream endpoint and report detected capabilities
+  doctor            Validate desktop-oriented Codex project wiring
 
 Options:
   -c, --config <CONFIG>              Path to config YAML file
