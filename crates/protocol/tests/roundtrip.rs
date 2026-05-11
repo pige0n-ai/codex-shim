@@ -324,30 +324,78 @@ mod tests {
         let e = protocol::error::ApiError::response_not_found("resp_xxx");
         assert!(e.error.message.contains("resp_xxx"));
     }
-}
 
-#[test]
-fn chat_usage_alias_roundtrip() {
-    use protocol::common::Usage;
+    #[test]
+    fn namespace_tool_deserialization() {
+        let json = r#"{
+            "type": "namespace",
+            "name": "mcp__rmcp",
+            "description": "Tools in the mcp__rmcp namespace.",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "echo",
+                    "description": "Echo back the input",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            ]
+        }"#;
+        let tool: ResponseTool = serde_json::from_str(json).unwrap();
+        match tool {
+            ResponseTool::Namespace {
+                ref name,
+                ref description,
+                ref tools,
+            } => {
+                assert_eq!(name, "mcp__rmcp");
+                assert_eq!(description, "Tools in the mcp__rmcp namespace.");
+                assert_eq!(tools.len(), 1);
+                match &tools[0] {
+                    NamespaceTool::Function { name, .. } => {
+                        assert_eq!(name, "echo");
+                    }
+                }
+            }
+            _ => panic!("Expected Namespace variant"),
+        }
 
-    // Chat Completions naming (prompt_tokens/completion_tokens)
-    let chat_json = r#"{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}"#;
-    let usage: Usage = serde_json::from_str(chat_json).unwrap();
-    assert_eq!(usage.input_tokens, 5);
-    assert_eq!(usage.output_tokens, 3);
-    assert_eq!(usage.total_tokens, 8);
+        // Verify roundtrip serialization preserves structure
+        let serialized = serde_json::to_value(&tool).unwrap();
+        assert_eq!(serialized["type"], "namespace");
+        assert_eq!(serialized["name"], "mcp__rmcp");
+        assert_eq!(serialized["tools"][0]["type"], "function");
+    }
 
-    // Responses naming (input_tokens/output_tokens)
-    let resp_json = r#"{"input_tokens":10,"output_tokens":7,"total_tokens":17}"#;
-    let usage: Usage = serde_json::from_str(resp_json).unwrap();
-    assert_eq!(usage.input_tokens, 10);
-    assert_eq!(usage.output_tokens, 7);
-    assert_eq!(usage.total_tokens, 17);
+    #[test]
+    fn unknown_tool_still_deserializes() {
+        let json = r#"{"type": "some_future_type", "foo": "bar"}"#;
+        let tool: ResponseTool = serde_json::from_str(json).unwrap();
+        assert!(matches!(tool, ResponseTool::UnknownTool));
+    }
 
-    // Serialize back uses Responses naming
-    let out = serde_json::to_value(&usage).unwrap();
-    assert_eq!(out["input_tokens"], 10);
-    assert_eq!(out["output_tokens"], 7);
-    assert!(out.get("prompt_tokens").is_none());
-    assert!(out.get("completion_tokens").is_none());
+    #[test]
+    fn chat_usage_alias_roundtrip() {
+        use protocol::common::Usage;
+
+        // Chat Completions naming (prompt_tokens/completion_tokens)
+        let chat_json = r#"{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}"#;
+        let usage: Usage = serde_json::from_str(chat_json).unwrap();
+        assert_eq!(usage.input_tokens, 5);
+        assert_eq!(usage.output_tokens, 3);
+        assert_eq!(usage.total_tokens, 8);
+
+        // Responses naming (input_tokens/output_tokens)
+        let resp_json = r#"{"input_tokens":10,"output_tokens":7,"total_tokens":17}"#;
+        let usage: Usage = serde_json::from_str(resp_json).unwrap();
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.total_tokens, 17);
+
+        // Serialize back uses Responses naming
+        let out = serde_json::to_value(&usage).unwrap();
+        assert_eq!(out["input_tokens"], 10);
+        assert_eq!(out["output_tokens"], 7);
+        assert!(out.get("prompt_tokens").is_none());
+        assert!(out.get("completion_tokens").is_none());
+    }
 }
