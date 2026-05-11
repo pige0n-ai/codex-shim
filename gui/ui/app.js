@@ -336,6 +336,15 @@ function bindEvents() {
     element.addEventListener("change", schedulePreview);
   });
 
+  els.generalListen.addEventListener("input", () => {
+    syncListenToYaml();
+    schedulePreview();
+  });
+  els.generalListen.addEventListener("change", () => {
+    syncListenToYaml();
+    schedulePreview();
+  });
+
   els.trustProject.addEventListener("change", () => {
     state.baseTomlDirty = false;
     schedulePreview();
@@ -1371,6 +1380,23 @@ function handleEditorTabKey(event) {
   }
 
   textarea.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function syncListenToYaml() {
+  const newListen = els.generalListen.value.trim();
+  if (!newListen) {
+    return;
+  }
+  let yaml = els.shimEditor.value;
+  // Replace the server.listen line
+  const replaced = yaml.replace(
+    /^(\s*listen:\s*)(["']?)([^"'\n]*)(\2)/m,
+    `$1"${newListen}"`
+  );
+  if (replaced !== yaml) {
+    els.shimEditor.value = replaced;
+    state.shimText = replaced;
+  }
 }
 
 function parseCatalogModels(catalogText) {

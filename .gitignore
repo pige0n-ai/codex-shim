@@ -3,3 +3,5 @@ target
 codex
 digest.txt
 secrets/
+.ext_refs/
+.DS_Store

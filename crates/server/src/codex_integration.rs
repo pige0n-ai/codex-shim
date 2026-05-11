@@ -215,17 +215,29 @@ pub fn apply_codex_integration(
     let target_path = PathBuf::from(&preview.target_path);
     write_toml_document(&target_path, &preview.merged_toml)?;
 
-    if options.project_dir.is_some() && options.trust_project {
-        let codex_home = resolve_codex_home(options.codex_home.as_deref())?;
+    if options.trust_project {
+        let project_dir = match options
+            .project_dir
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            Some(dir) => resolve_project_dir(dir)?,
+            None => {
+                return Err(anyhow!(
+                    "Trust project requires a project directory. Set one in General → Project directory."
+                ));
+            }
+        };
+
+        let codex_home = resolve_codex_home(options.codex_home.as_deref())
+            .with_context(|| {
+                format!(
+                    "Cannot write project trust entry because CODEX_HOME is not resolvable.                      Set CODEX_HOME environment variable or fill in the CODEX_HOME field in the GUI."
+                )
+            })?;
         std::fs::create_dir_all(&codex_home)
             .with_context(|| format!("failed to create CODEX_HOME at {}", codex_home.display()))?;
         let global_path = codex_home.join("config.toml");
-        let project_dir = resolve_project_dir(
-            options
-                .project_dir
-                .as_deref()
-                .ok_or_else(|| anyhow!("missing project_dir"))?,
-        )?;
         update_project_trust_entry(&global_path, &project_dir)?;
     }
 
@@ -241,12 +253,19 @@ pub fn doctor_desktop(
     config: &Config,
     options: &CodexIntegrationOptions,
 ) -> anyhow::Result<DesktopDoctorReport> {
-    let project_dir = resolve_project_dir(
-        options
-            .project_dir
-            .as_deref()
-            .ok_or_else(|| anyhow!("doctor_desktop requires project_dir"))?,
-    )?;
+    let project_dir = match options
+        .project_dir
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        Some(dir) => Some(resolve_project_dir(dir)?),
+        None => None,
+    };
+
+    let Some(project_dir) = project_dir else {
+        return Ok(build_missing_project_dir_report());
+    };
+
     let provider_id = if options.provider_id.trim().is_empty() {
         default_provider_id()
     } else {
@@ -324,7 +343,10 @@ fn resolve_target(
         }
         let project_dir = resolve_project_dir(project_dir)?;
         let trust_target_path = if options.trust_project {
-            Some(resolve_codex_home(options.codex_home.as_deref())?.join("config.toml"))
+            match resolve_codex_home(options.codex_home.as_deref()) {
+                Ok(home) => Some(home.join("config.toml")),
+                Err(_) => None,
+            }
         } else {
             None
         };
@@ -952,6 +974,38 @@ fn build_desktop_doctor_report(
     });
 
     Ok(DesktopDoctorReport { checks })
+}
+
+fn build_missing_project_dir_report() -> DesktopDoctorReport {
+    DesktopDoctorReport {
+        checks: vec![
+            DesktopCheck {
+                status: DesktopCheckStatus::Unsupported,
+                subject: "project_dir".into(),
+                detail: "No project directory configured. Set a project directory in General → Project directory before running doctor.".into(),
+            },
+            DesktopCheck {
+                status: DesktopCheckStatus::Unsupported,
+                subject: "project_config".into(),
+                detail: "Cannot check project config without a project directory.".into(),
+            },
+            DesktopCheck {
+                status: DesktopCheckStatus::Unsupported,
+                subject: "project_catalog".into(),
+                detail: "Cannot check project catalog without a project directory.".into(),
+            },
+            DesktopCheck {
+                status: DesktopCheckStatus::Unsupported,
+                subject: "project_trust".into(),
+                detail: "Cannot check project trust without a project directory.".into(),
+            },
+            DesktopCheck {
+                status: DesktopCheckStatus::Gated,
+                subject: "legacy_non_shim_threads".into(),
+                detail: "old non-shim desktop threads may still fail to resume with their original provider context; this depends on Codex desktop thread restoration behavior rather than codex-shim".into(),
+            },
+        ],
+    }
 }
 
 #[cfg(test)]
