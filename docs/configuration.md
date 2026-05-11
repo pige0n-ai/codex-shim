@@ -135,7 +135,7 @@ Run:
 
 That command writes:
 
-- `$CODEX_HOME/codex-shim/model-catalog.json`
+- `$CODEX_HOME/model-catalog-shim.json`
 - `$CODEX_HOME/config.toml`
 - `$CODEX_HOME/config.toml.bak.0` ... `.bak.3` rolling backups when `config.toml` already exists
 
@@ -421,7 +421,7 @@ If you need to inspect the shape it writes, it looks like:
 ```toml
 model_provider = "codex_shim"
 model = "deepseek-v4-pro"
-model_catalog_json = "/absolute/path/to/$CODEX_HOME/codex-shim/model-catalog.json"
+model_catalog_json = "/absolute/path/to/$CODEX_HOME/model-catalog-shim.json"
 web_search = "disabled"
 
 [model_providers.codex_shim]

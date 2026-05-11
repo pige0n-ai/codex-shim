@@ -69,7 +69,7 @@ models:
         - high
 
 state:
-  backend: memory          # memory | sqlite
+  backend: sqlite          # memory | sqlite
   ttl_seconds: 86400       # 24h
   cleanup_interval_seconds: 3600
   # sqlite_path: "~/.codex-shim/store.db"
