@@ -5,6 +5,124 @@ use serde::{Deserialize, Serialize};
 use crate::provider_profile_config::ProviderProfileConfig;
 use protocol::models::CatalogModelSpec;
 
+/// Profile-specific default values for upstream configuration.
+pub struct ProfileDefaultValues {
+    pub base_url: &'static str,
+    pub chat_path: &'static str,
+    pub responses_path: &'static str,
+    pub api_key_env: &'static str,
+}
+
+/// Get profile-specific defaults for the given profile name.
+/// Returns None for unknown profiles.
+pub fn profile_defaults_for_name(profile_name: &str) -> Option<ProfileDefaultValues> {
+    match profile_name {
+        "deepseek-chat" | "deepseek" => Some(ProfileDefaultValues {
+            base_url: "https://api.deepseek.com",
+            chat_path: "/chat/completions",
+            responses_path: "/responses",
+            api_key_env: "DEEPSEEK_API_KEY",
+        }),
+        "openrouter-chat" | "openrouter-responses" => Some(ProfileDefaultValues {
+            base_url: "https://openrouter.ai/api/v1",
+            chat_path: "/chat/completions",
+            responses_path: "/responses",
+            api_key_env: "OPENROUTER_API_KEY",
+        }),
+        "ollama-chat" | "ollama-responses" => Some(ProfileDefaultValues {
+            base_url: "http://127.0.0.1:11434/v1",
+            chat_path: "/chat/completions",
+            responses_path: "/responses",
+            api_key_env: "OLLAMA_API_KEY",
+        }),
+        "groq-chat" | "groq-responses" => Some(ProfileDefaultValues {
+            base_url: "https://api.groq.com/openai/v1",
+            chat_path: "/chat/completions",
+            responses_path: "/responses",
+            api_key_env: "GROQ_API_KEY",
+        }),
+        "fireworks-chat" | "fireworks-responses" => Some(ProfileDefaultValues {
+            base_url: "https://api.fireworks.ai/inference/v1",
+            chat_path: "/chat/completions",
+            responses_path: "/responses",
+            api_key_env: "FIREWORKS_API_KEY",
+        }),
+        "xai-chat" | "xai-responses" => Some(ProfileDefaultValues {
+            base_url: "https://api.x.ai/v1",
+            chat_path: "/chat/completions",
+            responses_path: "/responses",
+            api_key_env: "XAI_API_KEY",
+        }),
+        "together-chat" => Some(ProfileDefaultValues {
+            base_url: "https://api.together.xyz/v1",
+            chat_path: "/chat/completions",
+            responses_path: "/responses",
+            api_key_env: "TOGETHER_API_KEY",
+        }),
+        "alibaba-chat" | "alibaba-responses" => Some(ProfileDefaultValues {
+            base_url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+            chat_path: "/chat/completions",
+            responses_path: "/responses",
+            api_key_env: "DASHSCOPE_API_KEY",
+        }),
+        "gemini-chat" => Some(ProfileDefaultValues {
+            base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
+            chat_path: "/chat/completions",
+            responses_path: "/responses",
+            api_key_env: "GEMINI_API_KEY",
+        }),
+        "vertex-chat" => Some(ProfileDefaultValues {
+            base_url: "https://aiplatform.googleapis.com/v1",
+            chat_path: "/chat/completions",
+            responses_path: "/responses",
+            api_key_env: "GOOGLE_API_KEY",
+        }),
+        "moonshot-chat" => Some(ProfileDefaultValues {
+            base_url: "https://api.moonshot.cn/v1",
+            chat_path: "/chat/completions",
+            responses_path: "/responses",
+            api_key_env: "MOONSHOT_API_KEY",
+        }),
+        "minimax-chat" => Some(ProfileDefaultValues {
+            base_url: "https://api.minimax.chat/v1",
+            chat_path: "/chat/completions",
+            responses_path: "/responses",
+            api_key_env: "MINIMAX_API_KEY",
+        }),
+        "zai-chat" => Some(ProfileDefaultValues {
+            base_url: "https://api.z.ai/v1",
+            chat_path: "/chat/completions",
+            responses_path: "/responses",
+            api_key_env: "ZAI_API_KEY",
+        }),
+        "bedrock-chat" | "bedrock-responses" => Some(ProfileDefaultValues {
+            base_url: "https://bedrock-runtime.us-east-1.amazonaws.com",
+            chat_path: "/chat/completions",
+            responses_path: "/responses",
+            api_key_env: "AWS_ACCESS_KEY_ID",
+        }),
+        "vllm-chat" | "vllm-responses" => Some(ProfileDefaultValues {
+            base_url: "http://127.0.0.1:8000/v1",
+            chat_path: "/chat/completions",
+            responses_path: "/responses",
+            api_key_env: "VLLM_API_KEY",
+        }),
+        "sglang-chat" | "sglang" => Some(ProfileDefaultValues {
+            base_url: "http://127.0.0.1:30000/v1",
+            chat_path: "/chat/completions",
+            responses_path: "/responses",
+            api_key_env: "SGLANG_API_KEY",
+        }),
+        "llamacpp-chat" | "llamacpp-responses" => Some(ProfileDefaultValues {
+            base_url: "http://127.0.0.1:8080/v1",
+            chat_path: "/chat/completions",
+            responses_path: "/responses",
+            api_key_env: "LLAMACPP_API_KEY",
+        }),
+        _ => None,
+    }
+}
+
 /// Top-level configuration for the responses-adapter.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -367,6 +485,9 @@ impl Config {
         // Override with env vars: CODEX_SHIM_SERVER__LISTEN etc.
         Self::apply_env_overrides(&mut config);
 
+        // Expand implicit defaults from the selected provider profile.
+        config.expand_from_profile();
+
         Ok(config)
     }
 
@@ -403,6 +524,85 @@ impl Config {
             .unwrap_or_else(|| requested.to_string())
     }
 
+    /// Expand implicit defaults from the selected provider profile.
+    /// Called after Config::load to fill in fields the user didn't set.
+    pub fn expand_from_profile(&mut self) {
+        // Sync provider.kind from profile_config.profile when kind is default/empty
+        if let Some(ref profile_cfg) = self.provider.profile_config {
+            if !profile_cfg.profile.is_empty()
+                && (self.provider.kind.is_empty() || self.provider.kind == "deepseek-chat")
+                && self.provider.kind != profile_cfg.profile
+            {
+                tracing::info!(
+                    "Auto-syncing provider.kind from '{}' to '{}' (from profile_config.profile)",
+                    self.provider.kind,
+                    profile_cfg.profile
+                );
+                self.provider.kind = profile_cfg.profile.clone();
+            }
+        }
+
+        // Auto-fill upstream base_url from profile defaults when it's still the default
+        let profile_name = self
+            .provider
+            .profile_config
+            .as_ref()
+            .map(|pc| pc.profile.as_str())
+            .unwrap_or(&self.provider.kind);
+
+        if self.upstream.base_url == "https://api.deepseek.com"
+            || self.upstream.base_url.is_empty()
+        {
+            if let Some(defaults) = profile_defaults_for_name(profile_name) {
+                // Only override if the profile is NOT deepseek — the current base_url
+                // matches the DeepSeek default but the profile is different, so auto-fill.
+                if self.provider.kind != "deepseek-chat"
+                    && self.provider.kind != "deepseek"
+                {
+                    self.upstream.base_url = defaults.base_url.to_string();
+                    self.upstream.chat_path = defaults.chat_path.to_string();
+                    self.upstream.responses_path = defaults.responses_path.to_string();
+                    if self.upstream.api_key_env == "DEEPSEEK_API_KEY" {
+                        self.upstream.api_key_env = defaults.api_key_env.to_string();
+                    }
+                }
+            }
+        }
+
+        // Auto-generate implicit catalog entry when catalog is empty but default is set
+        if self.models.catalog.is_empty() && !self.models.default.is_empty() {
+            let caps = providers::preset_capabilities(profile_name)
+                .unwrap_or_else(protocol::provider_caps::ProviderCapabilities::generic_chat);
+            let slug = self.models.default.clone();
+            let reasoning_levels = if caps.supports_reasoning_effort {
+                Some(vec!["high".to_string()])
+            } else {
+                None
+            };
+            self.models.catalog = vec![CatalogModelSpec {
+                slug: slug.clone(),
+                display_name: Some(slug.clone()),
+                description: None,
+                context_window: 131072,
+                tool_calling: Some(caps.supports_function_tools),
+                vision: Some(caps.supports_vision_input),
+                reasoning_levels,
+                priority: Some(10),
+                base_instructions: Some(String::new()),
+                auto_compact_token_limit: None,
+                supports_search_tool: Some(false),
+                supports_reasoning_summaries: Some(false),
+                apply_patch_tool_type: None,
+                supports_image_detail_original: Some(false),
+            }];
+            tracing::info!(
+                "Auto-generated implicit catalog entry for model '{}' from profile '{}'",
+                slug,
+                profile_name
+            );
+        }
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.server.base_path != "/v1" {
             anyhow::bail!(
@@ -414,33 +614,35 @@ impl Config {
                 "features.* is no longer accepted in shim config. Remove the 'features' block; runtime behavior is derived from provider capabilities and model catalog metadata."
             );
         }
-        if self.models.catalog.is_empty() {
+        if self.models.catalog.is_empty() && self.models.default.trim().is_empty() {
             anyhow::bail!(
-                "models.catalog must define at least one model entry with slug and context_window for the shim-native /models endpoint"
+                "models.catalog is empty and models.default is not set; set models.default for auto-catalog generation, or define models.catalog explicitly"
             );
         }
-        for model in &self.models.catalog {
-            if model.slug.trim().is_empty() {
-                anyhow::bail!("models.catalog entries must have a non-empty slug");
+        if !self.models.catalog.is_empty() {
+            for model in &self.models.catalog {
+                if model.slug.trim().is_empty() {
+                    anyhow::bail!("models.catalog entries must have a non-empty slug");
+                }
+                if model.context_window <= 0 {
+                    anyhow::bail!(
+                        "models.catalog entry '{}' must have a positive context_window",
+                        model.slug
+                    );
+                }
             }
-            if model.context_window <= 0 {
+            let default_resolved = self.resolve_model(&self.models.default);
+            if !self
+                .models
+                .catalog
+                .iter()
+                .any(|model| model.slug == default_resolved)
+            {
                 anyhow::bail!(
-                    "models.catalog entry '{}' must have a positive context_window",
-                    model.slug
+                    "models.default resolves to '{}' but models.catalog does not contain that slug",
+                    default_resolved
                 );
             }
-        }
-        let default_resolved = self.resolve_model(&self.models.default);
-        if !self
-            .models
-            .catalog
-            .iter()
-            .any(|model| model.slug == default_resolved)
-        {
-            anyhow::bail!(
-                "models.default resolves to '{}' but models.catalog does not contain that slug",
-                default_resolved
-            );
         }
         Ok(())
     }
@@ -540,11 +742,19 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_empty_catalog() {
+    fn validate_rejects_empty_catalog_and_empty_default() {
         let mut config = valid_config();
         config.models.catalog.clear();
+        config.models.default.clear();
         let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("models.catalog must define at least one model entry"));
+        assert!(err.contains("models.catalog is empty and models.default is not set"));
+    }
+
+    #[test]
+    fn validate_accepts_empty_catalog_with_default() {
+        let config = Config::default();
+        // catalog is empty by default, but models.default is set
+        config.validate().expect("should accept empty catalog when models.default is set");
     }
 
     #[test]
@@ -591,5 +801,33 @@ mod tests {
     fn expand_tilde_leaves_plain_paths_unchanged() {
         let path = expand_tilde_with_home("config.yaml", Some(Path::new("/home/tester")));
         assert_eq!(path, Path::new("config.yaml"));
+    }
+
+    #[test]
+    fn expand_from_profile_generates_implicit_catalog() {
+        let mut config = Config::default();
+        config.provider.kind = "ollama-chat".into();
+        config.provider.profile_config = Some(ProviderProfileConfig {
+            profile: "ollama-chat".into(),
+            ..Default::default()
+        });
+        config.models.default = "qwen3.5:32b".into();
+        config.expand_from_profile();
+        assert_eq!(config.models.catalog.len(), 1);
+        assert_eq!(config.models.catalog[0].slug, "qwen3.5:32b");
+        assert_eq!(config.provider.kind, "ollama-chat");
+    }
+
+    #[test]
+    fn expand_from_profile_syncs_kind_from_profile() {
+        let mut config = Config::default();
+        config.provider.kind = "deepseek-chat".into(); // default value
+        config.provider.profile_config = Some(ProviderProfileConfig {
+            profile: "ollama-chat".into(),
+            ..Default::default()
+        });
+        config.models.default = "qwen3.5:32b".into();
+        config.expand_from_profile();
+        assert_eq!(config.provider.kind, "ollama-chat");
     }
 }
