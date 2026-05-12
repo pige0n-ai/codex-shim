@@ -528,18 +528,17 @@ impl Config {
     /// Called after Config::load to fill in fields the user didn't set.
     pub fn expand_from_profile(&mut self) {
         // Sync provider.kind from profile_config.profile when kind is default/empty
-        if let Some(ref profile_cfg) = self.provider.profile_config {
-            if !profile_cfg.profile.is_empty()
-                && (self.provider.kind.is_empty() || self.provider.kind == "deepseek-chat")
-                && self.provider.kind != profile_cfg.profile
-            {
-                tracing::info!(
-                    "Auto-syncing provider.kind from '{}' to '{}' (from profile_config.profile)",
-                    self.provider.kind,
-                    profile_cfg.profile
-                );
-                self.provider.kind = profile_cfg.profile.clone();
-            }
+        if let Some(ref profile_cfg) = self.provider.profile_config
+            && !profile_cfg.profile.is_empty()
+            && (self.provider.kind.is_empty() || self.provider.kind == "deepseek-chat")
+            && self.provider.kind != profile_cfg.profile
+        {
+            tracing::info!(
+                "Auto-syncing provider.kind from '{}' to '{}' (from profile_config.profile)",
+                self.provider.kind,
+                profile_cfg.profile
+            );
+            self.provider.kind = profile_cfg.profile.clone();
         }
 
         // Auto-fill upstream base_url from profile defaults when it's still the default
@@ -550,21 +549,20 @@ impl Config {
             .map(|pc| pc.profile.as_str())
             .unwrap_or(&self.provider.kind);
 
-        if self.upstream.base_url == "https://api.deepseek.com"
-            || self.upstream.base_url.is_empty()
+        if (self.upstream.base_url == "https://api.deepseek.com"
+            || self.upstream.base_url.is_empty())
+            && let Some(defaults) = profile_defaults_for_name(profile_name)
         {
-            if let Some(defaults) = profile_defaults_for_name(profile_name) {
-                // Only override if the profile is NOT deepseek — the current base_url
-                // matches the DeepSeek default but the profile is different, so auto-fill.
-                if self.provider.kind != "deepseek-chat"
-                    && self.provider.kind != "deepseek"
-                {
-                    self.upstream.base_url = defaults.base_url.to_string();
-                    self.upstream.chat_path = defaults.chat_path.to_string();
-                    self.upstream.responses_path = defaults.responses_path.to_string();
-                    if self.upstream.api_key_env == "DEEPSEEK_API_KEY" {
-                        self.upstream.api_key_env = defaults.api_key_env.to_string();
-                    }
+            // Only override if the profile is NOT deepseek — the current base_url
+            // matches the DeepSeek default but the profile is different, so auto-fill.
+            if self.provider.kind != "deepseek-chat"
+                && self.provider.kind != "deepseek"
+            {
+                self.upstream.base_url = defaults.base_url.to_string();
+                self.upstream.chat_path = defaults.chat_path.to_string();
+                self.upstream.responses_path = defaults.responses_path.to_string();
+                if self.upstream.api_key_env == "DEEPSEEK_API_KEY" {
+                    self.upstream.api_key_env = defaults.api_key_env.to_string();
                 }
             }
         }

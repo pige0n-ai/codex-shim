@@ -985,7 +985,7 @@ async fn cmd_init(
     let api_key_env: String = if meta.requires_api_key {
         let defaults = profile_defaults(&profile_name);
         let default_env = defaults.api_key_env.clone();
-        let env_var = inquire::Text::new("Upstream API key environment variable name:")
+        inquire::Text::new("Upstream API key environment variable name:")
             .with_default(&default_env)
             .with_validator(|val: &str| {
                 if val.trim().is_empty() {
@@ -997,15 +997,14 @@ async fn cmd_init(
                 }
             })
             .with_help_message("The env var that holds your upstream API key")
-            .prompt()?;
-        env_var
+            .prompt()?
     } else {
         let defaults = profile_defaults(&profile_name);
         let default_env = defaults.api_key_env.clone();
-        let answer = inquire::Text::new("Upstream API key env var (usually not needed for local providers):")
+        inquire::Text::new("Upstream API key env var (usually not needed for local providers):")
             .with_default(&default_env)
-            .prompt()?;
-        answer
+            .prompt()?
+
     };
 
     // Step 5: Model configuration
