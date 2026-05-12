@@ -85,6 +85,9 @@ pub fn responses_to_chat(
     let input_msgs = input_mapper::map_input_to_messages(&req.input)?;
     messages.extend(input_msgs);
 
+    // 3a. Enforce tool call adjacency required by OpenAI/DeepSeek API
+    protocol::canonical::enforce_tool_call_adjacency(&mut messages);
+
     // 3b. Detect if this request needs reasoning_content recovery.
     // Codex drops reasoning items when reconstructing multi-turn input.
     // If the input has tool outputs but no reasoning items, we need to

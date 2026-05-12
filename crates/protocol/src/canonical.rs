@@ -244,6 +244,8 @@ impl CanonicalRequest {
                 }
             }
         }
+        // 4. Enforce tool call adjacency required by OpenAI/DeepSeek API
+        enforce_tool_call_adjacency(&mut messages);
 
         let tools = if caps.tool_policy == ToolPolicy::NoTools || self.tools.is_empty() {
             None
@@ -967,6 +969,72 @@ fn role_str(role: &CanonicalMessageRole) -> &'static str {
     }
 }
 
+/// Enforce the OpenAI/DeepSeek API constraint that tool messages must
+/// immediately follow the assistant message that contains the corresponding
+/// tool_calls. Any non-Tool messages found between a tool_calls assistant
+/// and its tool results are moved to before the assistant message, preserving
+/// relative order.
+pub fn enforce_tool_call_adjacency(messages: &mut Vec<ChatMessage>) {
+    let mut i = 0;
+    while i < messages.len() {
+        // Collect tool_call_ids from an assistant message
+        let call_ids: Vec<String> = match &messages[i] {
+            ChatMessage::Assistant {
+                tool_calls: Some(tcs),
+                ..
+            } => tcs.iter().map(|tc| tc.id.clone()).collect(),
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+
+        if call_ids.is_empty() {
+            i += 1;
+            continue;
+        }
+
+        // Scan forward to find tool results for these calls.
+        // Track any non-Tool messages that intervene.
+        let mut j = i + 1;
+        let mut found: usize = 0;
+        let mut intervening_indices: Vec<usize> = Vec::new();
+
+        while j < messages.len() && found < call_ids.len() {
+            let is_tool_match = match &messages[j] {
+                ChatMessage::Tool { tool_call_id, .. } => {
+                    call_ids.iter().any(|id| id == tool_call_id)
+                }
+                _ => false,
+            };
+            if is_tool_match {
+                found += 1;
+            } else {
+                intervening_indices.push(j);
+            }
+            j += 1;
+        }
+
+        if !intervening_indices.is_empty() {
+            // Extract all intervening messages and insert them
+            // before the assistant message at position i.
+            // Remove in reverse order to preserve indices.
+            let mut moved: Vec<ChatMessage> = Vec::new();
+            for &idx in intervening_indices.iter().rev() {
+                moved.push(messages.remove(idx));
+            }
+            // Insert in original order before the assistant message
+            for msg in moved.into_iter().rev() {
+                messages.insert(i, msg);
+                i += 1;
+            }
+        }
+
+        // Advance past the assistant + all tool results
+        i += 1 + found;
+    }
+}
+
 fn canonical_message_to_chat(
     msg: &CanonicalMessage,
     pending_reasoning: &mut Option<String>,
@@ -1035,5 +1103,94 @@ fn canonical_message_to_chat(
                 reasoning_content: pending_reasoning.take(),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod adjacency_tests {
+    use super::*;
+    use crate::chat::{ChatContent, ChatFunctionCall, ChatMessage, ChatToolCall};
+
+    fn assistant_tool_call(id: &str, name: &str, args: &str) -> ChatMessage {
+        ChatMessage::Assistant {
+            content: None,
+            name: None,
+            tool_calls: Some(vec![ChatToolCall {
+                id: id.to_string(),
+                call_type: "function".into(),
+                function: ChatFunctionCall {
+                    name: Some(name.to_string()),
+                    arguments: args.to_string(),
+                },
+            }]),
+            reasoning_content: None,
+        }
+    }
+
+    fn tool_result(id: &str, output: &str) -> ChatMessage {
+        ChatMessage::Tool {
+            content: ChatContent::Text(output.to_string()),
+            tool_call_id: id.to_string(),
+        }
+    }
+
+    fn system_msg(text: &str) -> ChatMessage {
+        ChatMessage::System {
+            content: ChatContent::Text(text.to_string()),
+            name: None,
+        }
+    }
+
+    fn user_msg(text: &str) -> ChatMessage {
+        ChatMessage::User {
+            content: ChatContent::Text(text.to_string()),
+            name: None,
+        }
+    }
+
+    #[test]
+    fn moves_intervening_system_before_tool_call() {
+        let mut msgs = vec![
+            user_msg("hello"),
+            assistant_tool_call("call_1", "exec_command", "{}"),
+            system_msg("Approved command prefix saved:\n- [some prefix]"),
+            tool_result("call_1", "output"),
+        ];
+        enforce_tool_call_adjacency(&mut msgs);
+        assert_eq!(msgs.len(), 4);
+        assert!(matches!(&msgs[0], ChatMessage::User { .. }));
+        assert!(matches!(&msgs[1], ChatMessage::System { .. }));
+        assert!(matches!(
+            &msgs[2],
+            ChatMessage::Assistant {
+                tool_calls: Some(_),
+                ..
+            }
+        ));
+        assert!(matches!(&msgs[3], ChatMessage::Tool { .. }));
+    }
+
+    #[test]
+    fn leaves_adjacent_tool_calls_untouched() {
+        let mut msgs = vec![
+            user_msg("hello"),
+            assistant_tool_call("call_1", "exec_command", "{}"),
+            tool_result("call_1", "output"),
+        ];
+        let expected = msgs.clone();
+        enforce_tool_call_adjacency(&mut msgs);
+        assert_eq!(msgs, expected);
+    }
+
+    #[test]
+    fn no_tool_calls_leaves_messages_untouched() {
+        let mut msgs = vec![
+            user_msg("hello"),
+            system_msg("instructions"),
+            user_msg("world"),
+        ];
+        let expected = msgs.clone();
+        enforce_tool_call_adjacency(&mut msgs);
+        assert_eq!(msgs, expected);
     }
 }
