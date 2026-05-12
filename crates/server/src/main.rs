@@ -1033,11 +1033,10 @@ async fn cmd_init(
     let default_ctx = meta.default_context_window.to_string();
     let ctx_str = inquire::Text::new("Context window tokens:")
         .with_default(&default_ctx)
+        .with_help_message("Supports suffixes: k=1000, K=1024, m=1M, M=1MiB")
         .prompt()?;
-    let context_window: i64 = ctx_str
-        .trim()
-        .parse()
-        .unwrap_or(meta.default_context_window);
+    let context_window: i64 =
+        protocol::models::parse_context_window(&ctx_str).unwrap_or(meta.default_context_window);
 
     let reasoning_enabled = if caps.supports_reasoning_effort {
         inquire::Confirm::new("Enable reasoning/thinking?")

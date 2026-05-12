@@ -56,6 +56,85 @@ pub struct TruncationPolicyConfig {
     pub limit: i64,
 }
 
+/// Parse a context window value that may use unit suffixes.
+///
+/// - lowercase k/m/g = decimal (1_000 / 1_000_000 / 1_000_000_000)
+/// - uppercase K/M/G = binary (1_024 / 1_048_576 / 1_073_741_824)
+/// - bare integer passes through unchanged
+///
+/// Examples: `"128K"` → 131072, `"1m"` → 1_000_000, `"131072"` → 131072
+pub fn parse_context_window(input: &str) -> Result<i64, String> {
+    let s = input.trim();
+    if s.is_empty() {
+        return Err("context_window cannot be empty".into());
+    }
+
+    let (num_part, multiplier): (&str, i64) = if let Some(rest) = s.strip_suffix('K') {
+        (rest, 1_024)
+    } else if let Some(rest) = s.strip_suffix('k') {
+        (rest, 1_000)
+    } else if let Some(rest) = s.strip_suffix('M') {
+        (rest, 1_048_576)
+    } else if let Some(rest) = s.strip_suffix('m') {
+        (rest, 1_000_000)
+    } else if let Some(rest) = s.strip_suffix('G') {
+        (rest, 1_073_741_824)
+    } else if let Some(rest) = s.strip_suffix('g') {
+        (rest, 1_000_000_000)
+    } else {
+        (s, 1)
+    };
+
+    let base: f64 = num_part
+        .parse()
+        .map_err(|_| format!("invalid number: {}", num_part))?;
+    let result = (base * multiplier as f64) as i64;
+    if result <= 0 {
+        return Err(format!("context_window must be positive, got {}", result));
+    }
+    Ok(result)
+}
+
+fn deserialize_context_window<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+
+    struct CtxWindowVisitor;
+
+    impl<'de> Visitor<'de> for CtxWindowVisitor {
+        type Value = i64;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("an integer or a string with optional k/K/m/M/g/G suffix")
+        }
+
+        fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(v)
+        }
+
+        fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(v as i64)
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            parse_context_window(v).map_err(de::Error::custom)
+        }
+    }
+
+    deserializer.deserialize_any(CtxWindowVisitor)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CatalogModelSpec {
     pub slug: String,
@@ -63,6 +142,7 @@ pub struct CatalogModelSpec {
     pub display_name: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(deserialize_with = "deserialize_context_window")]
     pub context_window: i64,
     #[serde(default)]
     pub tool_calling: Option<bool>,
@@ -167,4 +247,77 @@ pub fn build_model_info(spec: &CatalogModelSpec, caps: &ProviderCapabilities) ->
 
 fn default_web_search_tool_type() -> String {
     "text".into()
+}
+
+#[cfg(test)]
+mod context_window_tests {
+    use super::parse_context_window;
+
+    #[test]
+    fn plain_integer() {
+        assert_eq!(parse_context_window("131072").unwrap(), 131072);
+    }
+
+    #[test]
+    fn lowercase_k_is_1000() {
+        assert_eq!(parse_context_window("1k").unwrap(), 1_000);
+        assert_eq!(parse_context_window("131k").unwrap(), 131_000);
+    }
+
+    #[test]
+    fn uppercase_k_is_1024() {
+        assert_eq!(parse_context_window("128K").unwrap(), 131072);
+        assert_eq!(parse_context_window("1K").unwrap(), 1024);
+    }
+
+    #[test]
+    fn lowercase_m_is_million() {
+        assert_eq!(parse_context_window("1m").unwrap(), 1_000_000);
+    }
+
+    #[test]
+    fn uppercase_m_is_mebibyte() {
+        assert_eq!(parse_context_window("1M").unwrap(), 1_048_576);
+    }
+
+    #[test]
+    fn lowercase_g_is_billion() {
+        assert_eq!(parse_context_window("1g").unwrap(), 1_000_000_000);
+    }
+
+    #[test]
+    fn uppercase_g_is_gibibyte() {
+        assert_eq!(parse_context_window("1G").unwrap(), 1_073_741_824);
+    }
+
+    #[test]
+    fn fractional_multiplier() {
+        assert_eq!(parse_context_window("1.5K").unwrap(), 1536);
+        assert_eq!(parse_context_window("0.5m").unwrap(), 500_000);
+    }
+
+    #[test]
+    fn rejects_empty() {
+        assert!(parse_context_window("").is_err());
+    }
+
+    #[test]
+    fn rejects_invalid() {
+        assert!(parse_context_window("abc").is_err());
+        assert!(parse_context_window("abcK").is_err());
+    }
+
+    #[test]
+    fn deserializes_string_suffix_in_catalog() {
+        let json = r#"{"slug":"test-model","context_window":"128K"}"#;
+        let spec: super::CatalogModelSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.context_window, 131072);
+    }
+
+    #[test]
+    fn deserializes_plain_integer_in_catalog() {
+        let json = r#"{"slug":"test-model","context_window":131072}"#;
+        let spec: super::CatalogModelSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.context_window, 131072);
+    }
 }
