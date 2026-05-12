@@ -980,7 +980,8 @@ pub fn enforce_tool_call_adjacency(messages: &mut Vec<ChatMessage>) {
         // Collect tool_call_ids from an assistant message
         let call_ids: Vec<String> = match &messages[i] {
             ChatMessage::Assistant {
-                tool_calls: Some(tcs), ..
+                tool_calls: Some(tcs),
+                ..
             } => tcs.iter().map(|tc| tc.id.clone()).collect(),
             _ => {
                 i += 1;
@@ -1159,7 +1160,13 @@ mod adjacency_tests {
         assert_eq!(msgs.len(), 4);
         assert!(matches!(&msgs[0], ChatMessage::User { .. }));
         assert!(matches!(&msgs[1], ChatMessage::System { .. }));
-        assert!(matches!(&msgs[2], ChatMessage::Assistant { tool_calls: Some(_), .. }));
+        assert!(matches!(
+            &msgs[2],
+            ChatMessage::Assistant {
+                tool_calls: Some(_),
+                ..
+            }
+        ));
         assert!(matches!(&msgs[3], ChatMessage::Tool { .. }));
     }
 
@@ -1187,4 +1194,3 @@ mod adjacency_tests {
         assert_eq!(msgs, expected);
     }
 }
-
