@@ -1312,7 +1312,7 @@ fn generate_slim_config(
         } else {
             ""
         };
-        format!("      reasoning_levels:{levels}")
+        format!("\n      reasoning_levels:{levels}")
     } else {
         String::new()
     };
