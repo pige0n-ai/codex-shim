@@ -283,9 +283,11 @@ async fn main() -> anyhow::Result<()> {
             start,
             dry_run,
         }) => cmd_setup(config.as_deref().or(cli.config.as_deref()), start, dry_run).await,
-        Some(Commands::Quickstart { output, non_interactive, start }) => {
-            cmd_quickstart(&output, non_interactive, start, cli.config.as_deref()).await
-        }
+        Some(Commands::Quickstart {
+            output,
+            non_interactive,
+            start,
+        }) => cmd_quickstart(&output, non_interactive, start, cli.config.as_deref()).await,
         Some(Commands::ConfigShow { format }) => cmd_config_show(cli.config.as_deref(), &format),
         None => run_server(&cli).await,
     }
@@ -902,14 +904,13 @@ async fn check_upstream_connectivity(config: &Config, api_key: Option<&str>) -> 
 
 // ── init ─────────────────────────────────────────────────────────
 
-
 async fn cmd_init(
     output: &str,
     non_interactive: bool,
     setup: bool,
     _global_config: Option<&str>,
 ) -> anyhow::Result<()> {
-    use providers::{preset_capabilities, ProfileCategory, profiles_by_category};
+    use providers::{ProfileCategory, preset_capabilities, profiles_by_category};
 
     let output_path = codex_shim::config::expand_tilde(output);
     if output_path.exists() && !non_interactive {
@@ -941,15 +942,15 @@ async fn cmd_init(
         "🏠 Local / Self-hosted (Ollama, vLLM, SGLang, llama.cpp)",
         "🔧 Generic OpenAI-compatible",
     ];
-    let cat_choice = inquire::Select::new(
-        "Choose your provider category:",
-        category_labels.to_vec(),
-    )
-    .with_help_message("Use ↑↓ to navigate, Enter to select")
-    .prompt()?;
+    let cat_choice =
+        inquire::Select::new("Choose your provider category:", category_labels.to_vec())
+            .with_help_message("Use ↑↓ to navigate, Enter to select")
+            .prompt()?;
     let selected_category = match cat_choice {
         "☁️  Hosted API (DeepSeek, OpenRouter, xAI, Groq, …)" => ProfileCategory::HostedApi,
-        "🏠 Local / Self-hosted (Ollama, vLLM, SGLang, llama.cpp)" => ProfileCategory::LocalSelfHosted,
+        "🏠 Local / Self-hosted (Ollama, vLLM, SGLang, llama.cpp)" => {
+            ProfileCategory::LocalSelfHosted
+        }
         _ => ProfileCategory::Generic,
     };
 
@@ -959,13 +960,13 @@ async fn cmd_init(
         .iter()
         .map(|meta| format!("{:<22} {}", meta.name, meta.description))
         .collect();
-    let profile_choice = inquire::Select::new(
-        "Choose provider profile:",
-        profile_labels.clone(),
-    )
-    .with_help_message("Use ↑↓ to navigate, type to filter, Enter to select")
-    .prompt()?;
-    let selected_idx = profile_labels.iter().position(|l| l == &profile_choice).unwrap_or(0);
+    let profile_choice = inquire::Select::new("Choose provider profile:", profile_labels.clone())
+        .with_help_message("Use ↑↓ to navigate, type to filter, Enter to select")
+        .prompt()?;
+    let selected_idx = profile_labels
+        .iter()
+        .position(|l| l == &profile_choice)
+        .unwrap_or(0);
     let meta = profiles_in_category[selected_idx];
     let profile_name = meta.name.to_string();
 
@@ -1004,7 +1005,6 @@ async fn cmd_init(
         inquire::Text::new("Upstream API key env var (usually not needed for local providers):")
             .with_default(&default_env)
             .prompt()?
-
     };
 
     // Step 5: Model configuration
@@ -1012,7 +1012,10 @@ async fn cmd_init(
         .unwrap_or_else(protocol::provider_caps::ProviderCapabilities::generic_chat);
 
     let recommended = meta.recommended_models;
-    let default_model = recommended.first().map(|s| s.to_string()).unwrap_or_else(|| "model-slug".to_string());
+    let default_model = recommended
+        .first()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "model-slug".to_string());
 
     let model_slug = inquire::Text::new("Default model slug:")
         .with_default(&default_model)
@@ -1031,7 +1034,10 @@ async fn cmd_init(
     let ctx_str = inquire::Text::new("Context window tokens:")
         .with_default(&default_ctx)
         .prompt()?;
-    let context_window: i64 = ctx_str.trim().parse().unwrap_or(meta.default_context_window);
+    let context_window: i64 = ctx_str
+        .trim()
+        .parse()
+        .unwrap_or(meta.default_context_window);
 
     let reasoning_enabled = if caps.supports_reasoning_effort {
         inquire::Confirm::new("Enable reasoning/thinking?")
@@ -1079,7 +1085,11 @@ async fn cmd_init(
     // Step 8: Show summary and confirm
     let defaults = profile_defaults(&profile_name);
     let effective_base_url = custom_base_url.as_deref().unwrap_or(&defaults.base_url);
-    let key_status = if std::env::var(&api_key_env).is_ok() { "✓ set" } else { "⚠ not set in current shell" };
+    let key_status = if std::env::var(&api_key_env).is_ok() {
+        "✓ set"
+    } else {
+        "⚠ not set in current shell"
+    };
 
     println!();
     println!("╭───────────────────────────────────────────╮");
@@ -1087,21 +1097,32 @@ async fn cmd_init(
     println!("├───────────────────────────────────────────┤");
     println!("│  Profile:     {:<27}│", profile_name);
     println!("│  Upstream:    {:<27}│", effective_base_url);
-    println!("│  API key:     {:<27}│", format!("{} {}", api_key_env, key_status));
+    println!(
+        "│  API key:     {:<27}│",
+        format!("{} {}", api_key_env, key_status)
+    );
     println!("│  Model:       {:<27}│", model_slug);
-    println!("│  Context:     {:<27}│", format!("{} tokens", context_window));
-    println!("│  Reasoning:   {:<27}│", if reasoning_enabled { format!("enabled (effort: {})", reasoning_effort) } else { "disabled".to_string() });
+    println!(
+        "│  Context:     {:<27}│",
+        format!("{} tokens", context_window)
+    );
+    println!(
+        "│  Reasoning:   {:<27}│",
+        if reasoning_enabled {
+            format!("enabled (effort: {})", reasoning_effort)
+        } else {
+            "disabled".to_string()
+        }
+    );
     println!("│  State:       {:<27}│", "adapter memory store");
     println!("│  Listen:      {:<27}│", "127.0.0.1:8787");
     println!("╰───────────────────────────────────────────╯");
     println!();
 
-    let write_config = inquire::Confirm::new(&format!(
-        "Write config to {}?",
-        output_path.display()
-    ))
-    .with_default(true)
-    .prompt()?;
+    let write_config =
+        inquire::Confirm::new(&format!("Write config to {}?", output_path.display()))
+            .with_default(true)
+            .prompt()?;
 
     if !write_config {
         println!("Aborted.");
@@ -1128,7 +1149,10 @@ async fn cmd_init(
         println!();
         println!("Next steps:");
         println!("  1. Export your API key:  export {api_key_env}=\"sk-...\"");
-        println!("  2. Run setup:            codex-shim setup --config {} --start", output_path.display());
+        println!(
+            "  2. Run setup:            codex-shim setup --config {} --start",
+            output_path.display()
+        );
         println!();
         println!("Or run everything in one step:");
         println!("  codex-shim quickstart");
@@ -1237,7 +1261,6 @@ logging:
     Ok(())
 }
 
-
 /// Generate a slim config YAML that only contains user-specified fields.
 fn generate_slim_config(
     profile_name: &str,
@@ -1276,11 +1299,15 @@ fn generate_slim_config(
             .unwrap_or_else(protocol::provider_caps::ProviderCapabilities::generic_chat);
         let levels = if caps.supports_reasoning_effort {
             match reasoning_effort {
-                "xhigh" => "
+                "xhigh" => {
+                    "
       - xhigh
-      - high",
-                _ => "
-      - high",
+      - high"
+                }
+                _ => {
+                    "
+      - high"
+                }
             }
         } else {
             ""
@@ -1614,8 +1641,14 @@ async fn cmd_quickstart(
     } else {
         let config = Config::load(Some(config_path.to_string_lossy().as_ref()))?;
         println!("Next steps:");
-        println!("  1. Export your API key:  export {}=\"sk-...\"", config.upstream.api_key_env);
-        println!("  2. Start the shim:       codex-shim --config {}", config_path.display());
+        println!(
+            "  1. Export your API key:  export {}=\"sk-...\"",
+            config.upstream.api_key_env
+        );
+        println!(
+            "  2. Start the shim:       codex-shim --config {}",
+            config_path.display()
+        );
         println!("  3. Run Codex:            codex");
     }
 
@@ -1663,7 +1696,14 @@ fn cmd_config_show(config_path: Option<&str>, format: &str) -> anyhow::Result<()
             println!("  API key env:  {}", config.upstream.api_key_env);
             println!("  Listen:       {}", config.server.listen);
             println!("  State:        {}", config.state.backend);
-            println!("  Reasoning:    {}", if config.reasoning.enabled { "enabled" } else { "disabled" });
+            println!(
+                "  Reasoning:    {}",
+                if config.reasoning.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
             println!("  Catalog:      {} model(s)", config.models.catalog.len());
             println!("  Logging:      {}", config.logging.level);
         }
@@ -1671,7 +1711,6 @@ fn cmd_config_show(config_path: Option<&str>, format: &str) -> anyhow::Result<()
 
     Ok(())
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DesktopCheckStatus {

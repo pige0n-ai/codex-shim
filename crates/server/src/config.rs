@@ -555,9 +555,7 @@ impl Config {
         {
             // Only override if the profile is NOT deepseek — the current base_url
             // matches the DeepSeek default but the profile is different, so auto-fill.
-            if self.provider.kind != "deepseek-chat"
-                && self.provider.kind != "deepseek"
-            {
+            if self.provider.kind != "deepseek-chat" && self.provider.kind != "deepseek" {
                 self.upstream.base_url = defaults.base_url.to_string();
                 self.upstream.chat_path = defaults.chat_path.to_string();
                 self.upstream.responses_path = defaults.responses_path.to_string();
@@ -752,7 +750,9 @@ mod tests {
     fn validate_accepts_empty_catalog_with_default() {
         let config = Config::default();
         // catalog is empty by default, but models.default is set
-        config.validate().expect("should accept empty catalog when models.default is set");
+        config
+            .validate()
+            .expect("should accept empty catalog when models.default is set");
     }
 
     #[test]
