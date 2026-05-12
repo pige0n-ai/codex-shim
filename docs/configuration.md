@@ -3,12 +3,50 @@
 Start here if you already have a `codex-shim` release archive and want the
 fastest path to a working setup.
 
-The short version is:
+## The Fast Path: Interactive Setup
 
-1. Copy one bundled shim example instead of writing `config.yaml` from scratch.
-2. Keep one model slug aligned across Codex and the shim.
-3. Do not touch `profile_config` unless you are intentionally overriding a
-   built-in provider preset.
+```bash
+./codex-shim init --setup
+```
+
+This single command handles everything: choose a provider, configure your model,
+write the minimal config, install Codex startup files, and start the server.
+No YAML editing required.
+
+## The Manual Path: Minimal Config
+
+If you prefer to write the config yourself, a minimal config only needs three sections:
+
+```yaml
+provider:
+  kind: deepseek-chat        # pick from 27 built-in profiles
+  profile_config:
+    profile: deepseek-chat   # same as provider.kind
+
+upstream:
+  api_key_env: DEEPSEEK_API_KEY
+
+models:
+  default: deepseek-v4-pro
+  catalog:
+    - slug: deepseek-v4-pro
+      context_window: 131072
+```
+
+All other fields (`server.listen`, `reasoning.*`, `state.*`, `logging.*`) use
+sensible built-in defaults derived from your chosen provider profile.
+
+Then validate and start:
+
+```bash
+./codex-shim validate
+export DEEPSEEK_API_KEY="sk-..."
+./codex-shim setup --start
+```
+
+## The Full Reference
+
+If you need fine-grained control over every option, keep reading.
 
 If you are targeting the Codex desktop app instead of only the CLI, also read
 [docs/desktop.md](/home/vivec/codex-shim/docs/desktop.md). Desktop support has a
@@ -177,6 +215,26 @@ If requests reach the shim but fail upstream, the first things to check are:
 - the upstream API key env var name in `upstream.api_key_env`
 - the upstream model slug in `models.default` and `models.catalog[*].slug`
 - the Codex `model` value in `$CODEX_HOME/config.toml`
+
+## Validating Your Config
+
+Before starting the shim, you can validate your config offline:
+
+```bash
+./codex-shim validate                            # check syntax and logic
+./codex-shim validate --config path/to/config.yaml
+./codex-shim validate --check-upstream            # also probe upstream connectivity
+```
+
+The validator checks:
+- YAML syntax and schema
+- `models.catalog` is populated and `models.default` resolves to a catalog entry
+- `server.base_path` is `/v1` (required)
+- No legacy `features.*` block
+- Consistency between `provider.kind` and `profile_config.profile`
+- Consistency between `reasoning.enabled` and model `reasoning_levels`
+
+Non-zero exit code means there is a problem to fix before starting the server.
 
 ## Before You Customize Anything
 
@@ -468,6 +526,17 @@ Then run Codex normally:
 ```bash
 codex
 ```
+
+## Provider Configuration: `kind` vs `profile_config`
+
+There are two provider fields in the config, but only one matters for runtime behavior:
+
+- `provider.profile_config.profile` — the **real source of truth** for shim behavior
+- `provider.kind` — a **legacy shortcut**; if `profile_config` is present, `profile_config.profile` takes precedence
+
+When both are set but differ, `codex-shim validate` will warn you.
+
+In minimal configs and `init`-generated configs, only `profile_config.profile` is set.
 
 ## What `profile_config` Actually Does
 

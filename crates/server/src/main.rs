@@ -131,6 +131,39 @@ enum Commands {
         #[command(subcommand)]
         command: DoctorCommands,
     },
+    /// Validate the shim config YAML for correctness and report any issues.
+    Validate {
+        /// Optional path to config YAML file. Uses --config or default path if omitted.
+        #[arg(short, long)]
+        config: Option<String>,
+        /// If set, also probe the upstream endpoint to verify connectivity.
+        #[arg(long)]
+        check_upstream: bool,
+    },
+    /// Interactive setup wizard: choose a provider profile, configure models, and write a minimal config.
+    Init {
+        /// Path where the generated config YAML will be written.
+        #[arg(long, default_value = "~/.codex-shim/config.yaml")]
+        output: String,
+        /// Non-interactive mode: accept all defaults without prompting.
+        #[arg(long)]
+        non_interactive: bool,
+        /// If set, automatically run `setup` after writing the config.
+        #[arg(long)]
+        setup: bool,
+    },
+    /// One-shot command: validate config, install Codex startup catalog, and optionally start the server.
+    Setup {
+        /// Path to config YAML file. Uses --config or default path if omitted.
+        #[arg(short, long)]
+        config: Option<String>,
+        /// Start the shim server after installing Codex config.
+        #[arg(long)]
+        start: bool,
+        /// Print what would be done without actually writing or starting anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -218,6 +251,20 @@ async fn main() -> anyhow::Result<()> {
                 &provider_id,
             ),
         },
+        Some(Commands::Validate {
+            config,
+            check_upstream,
+        }) => cmd_validate(config.as_deref().or(cli.config.as_deref()), check_upstream).await,
+        Some(Commands::Init {
+            output,
+            non_interactive,
+            setup,
+        }) => cmd_init(&output, non_interactive, setup, cli.config.as_deref()).await,
+        Some(Commands::Setup {
+            config,
+            start,
+            dry_run,
+        }) => cmd_setup(config.as_deref().or(cli.config.as_deref()), start, dry_run).await,
         None => run_server(&cli).await,
     }
 }
@@ -707,6 +754,578 @@ async fn cmd_probe(base_url: &str, api_key_env: Option<&str>) -> anyhow::Result<
     }
 
     println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+// ── validate ─────────────────────────────────────────────────────
+
+async fn cmd_validate(config_path: Option<&str>, check_upstream: bool) -> anyhow::Result<()> {
+    let path_display = config_path.unwrap_or("~/.codex-shim/config.yaml");
+
+    let config = match Config::load(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("✗ Failed to load config from {path_display}");
+            eprintln!("  {e}");
+            std::process::exit(1);
+        }
+    };
+
+    println!("✓ Config loaded: {path_display}");
+
+    match config.validate() {
+        Ok(()) => {
+            println!("✓ Config validation passed");
+
+            // Check provider kind vs profile_config consistency
+            if let Some(ref profile_cfg) = config.provider.profile_config
+                && !config.provider.kind.is_empty()
+                && config.provider.kind != profile_cfg.profile
+            {
+                println!(
+                    "⚠ Warning: provider.kind ({}) differs from profile_config.profile ({}).                      profile_config.profile takes precedence.",
+                    config.provider.kind, profile_cfg.profile
+                );
+            }
+
+            // Check reasoning vs catalog consistency
+            for model in &config.models.catalog {
+                let has_reasoning = model
+                    .reasoning_levels
+                    .as_ref()
+                    .is_some_and(|levels| !levels.is_empty());
+                if config.reasoning.enabled && !has_reasoning {
+                    println!(
+                        "⚠ Warning: reasoning.enabled=true but model '{}' has no reasoning_levels.                          Codex will see this model as non-reasoning.",
+                        model.slug
+                    );
+                }
+            }
+
+            // Check model alignment
+            let default_resolved = config.resolve_model(&config.models.default);
+            let in_catalog = config
+                .models
+                .catalog
+                .iter()
+                .any(|m| m.slug == default_resolved);
+            if !in_catalog {
+                println!(
+                    "⚠ Warning: models.default '{}' resolves to '{}' which is not in models.catalog.                      Codex may request a model that the shim does not advertise.",
+                    config.models.default, default_resolved
+                );
+            }
+
+            if check_upstream {
+                println!();
+                println!("Probing upstream endpoint...");
+                let api_key = std::env::var(&config.upstream.api_key_env).ok();
+                if api_key.is_none() {
+                    println!(
+                        "⚠ Warning: upstream API key env var '{}' is not set.                          Upstream connectivity check will likely fail.",
+                        config.upstream.api_key_env
+                    );
+                }
+                match check_upstream_connectivity(&config, api_key.as_deref()).await {
+                    Ok(()) => println!("✓ Upstream connectivity check passed"),
+                    Err(e) => {
+                        eprintln!("✗ Upstream connectivity check failed");
+                        eprintln!("  {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("✗ Config validation failed");
+            eprintln!("  {e}");
+            std::process::exit(1);
+        }
+    }
+
+    println!();
+    println!("Config summary:");
+    println!("  Provider:  {}", config.provider.kind);
+    println!("  Model:     {}", config.models.default);
+    println!("  Upstream:  {}", config.upstream.base_url);
+    println!("  Listen:    {}", config.server.listen);
+    println!("  Catalog:   {} model(s)", config.models.catalog.len());
+
+    Ok(())
+}
+
+async fn check_upstream_connectivity(config: &Config, api_key: Option<&str>) -> anyhow::Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+
+    let models_url = format!(
+        "{}{}",
+        config.upstream.base_url.trim_end_matches('/'),
+        config.upstream.models_path
+    );
+    let mut req = client.get(&models_url);
+    if let Some(key) = api_key {
+        req = req.bearer_auth(key);
+    }
+
+    let resp = req.send().await?;
+    let status = resp.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        anyhow::bail!("upstream returned HTTP {status} for GET {models_url}")
+    }
+}
+
+// ── init ─────────────────────────────────────────────────────────
+
+async fn cmd_init(
+    output: &str,
+    non_interactive: bool,
+    setup: bool,
+    _global_config: Option<&str>,
+) -> anyhow::Result<()> {
+    use providers::{CANONICAL_PROFILE_NAMES, preset_capabilities};
+
+    let output_path = codex_shim::config::expand_tilde(output);
+    if output_path.exists() && !non_interactive {
+        eprint!(
+            "Config file {} already exists. Overwrite? [y/N]: ",
+            output_path.display()
+        );
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    if !non_interactive {
+        println!("╔══════════════════════════════════════════════════════════╗");
+        println!("║          codex-shim Interactive Setup Wizard            ║");
+        println!("╚══════════════════════════════════════════════════════════╝");
+        println!();
+    }
+
+    // Step 1: Choose provider profile
+    let profile_name: String = if non_interactive {
+        "deepseek-chat".to_string()
+    } else {
+        println!("Available provider profiles:");
+        for (i, name) in CANONICAL_PROFILE_NAMES.iter().enumerate() {
+            println!("  {:>2}. {}", i + 1, name);
+        }
+        println!();
+        print!("Choose a profile [1]: ");
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let input = input.trim();
+        if input.is_empty() {
+            CANONICAL_PROFILE_NAMES[0].to_string()
+        } else if let Ok(idx) = input.parse::<usize>() {
+            if idx >= 1 && idx <= CANONICAL_PROFILE_NAMES.len() {
+                CANONICAL_PROFILE_NAMES[idx - 1].to_string()
+            } else {
+                anyhow::bail!("Invalid selection: {idx}");
+            }
+        } else if CANONICAL_PROFILE_NAMES.contains(&input) {
+            input.to_string()
+        } else {
+            anyhow::bail!("Unknown profile: {input}");
+        }
+    };
+
+    let caps = preset_capabilities(&profile_name)
+        .unwrap_or_else(protocol::provider_caps::ProviderCapabilities::generic_chat);
+    let default_upstream = profile_defaults(&profile_name);
+
+    // Step 2: API key env var
+    let api_key_env: String = if non_interactive {
+        default_upstream.api_key_env.clone()
+    } else {
+        println!();
+        print!(
+            "Upstream API key environment variable name [{}]: ",
+            default_upstream.api_key_env
+        );
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let input = input.trim().to_string();
+        if input.is_empty() {
+            default_upstream.api_key_env.clone()
+        } else {
+            input
+        }
+    };
+
+    // Step 3: Model slug
+    let (model_slug, context_window): (String, i64) = if non_interactive {
+        ("deepseek-v4-pro".to_string(), 131072)
+    } else {
+        println!();
+        print!("Default model slug [deepseek-v4-pro]: ");
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+        let mut slug = String::new();
+        std::io::stdin().read_line(&mut slug)?;
+        let slug = slug.trim().to_string();
+        let slug = if slug.is_empty() {
+            "deepseek-v4-pro".to_string()
+        } else {
+            slug
+        };
+
+        print!("Context window tokens [131072]: ");
+        std::io::stdout().flush().ok();
+        let mut ctx = String::new();
+        std::io::stdin().read_line(&mut ctx)?;
+        let ctx = ctx.trim().to_string();
+        let ctx: i64 = if ctx.is_empty() {
+            131072
+        } else {
+            ctx.parse().unwrap_or(131072)
+        };
+
+        (slug, ctx)
+    };
+
+    // Step 4: Build minimal config
+    let reasoning_levels = if caps.supports_reasoning_effort {
+        Some(vec!["high".to_string()])
+    } else {
+        None
+    };
+
+    let reasoning_enabled = caps.supports_reasoning_effort;
+
+    let config_yaml = format!(
+        r#"# codex-shim config — generated by `codex-shim init`
+# Profile: {profile_name}
+#
+# Minimal config. All omitted fields use built-in defaults for this profile.
+# See: examples/all-options.yaml for the full reference.
+
+server:
+  listen: "{listen}"
+
+upstream:
+  base_url: "{base_url}"
+  chat_path: "{chat_path}"
+  responses_path: "{responses_path}"
+  api_key_env: "{api_key_env}"
+
+provider:
+  kind: {profile_name}
+  profile_config:
+    profile: {profile_name}
+
+reasoning:
+  enabled: {reasoning_enabled}
+  effort: high
+
+models:
+  default: "{model_slug}"
+  catalog:
+    - slug: "{model_slug}"
+      context_window: {context_window}{reasoning_levels_yaml}
+
+state:
+  backend: memory
+
+logging:
+  level: info
+"#,
+        profile_name = profile_name,
+        listen = "127.0.0.1:8787",
+        base_url = default_upstream.base_url,
+        chat_path = default_upstream.chat_path,
+        responses_path = default_upstream.responses_path,
+        api_key_env = api_key_env,
+        reasoning_enabled = reasoning_enabled,
+        model_slug = model_slug,
+        context_window = context_window,
+        reasoning_levels_yaml = if let Some(ref levels) = reasoning_levels {
+            format!(
+                "
+      reasoning_levels:
+{}",
+                levels
+                    .iter()
+                    .map(|l| format!("        - {}", l))
+                    .collect::<Vec<_>>()
+                    .join(
+                        "
+"
+                    )
+            )
+        } else {
+            String::new()
+        },
+    );
+
+    // Write config
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&output_path, config_yaml.trim())?;
+    println!();
+    println!("✓ Config written to {}", output_path.display());
+
+    // Validate the generated config
+    let config = Config::load(Some(output_path.to_string_lossy().as_ref()))?;
+    config.validate()?;
+    println!("✓ Config validation passed");
+
+    if setup {
+        println!();
+        println!("Running setup...");
+        cmd_setup(Some(output_path.to_string_lossy().as_ref()), true, false).await?;
+    } else if !non_interactive {
+        println!();
+        println!("Next steps:");
+        println!("  1. Export your API key:  export {api_key_env}=\"sk-...\"");
+        println!(
+            "  2. Run setup:            codex-shim setup --config {} --start",
+            output_path.display()
+        );
+        println!();
+        println!("Or run everything in one step:");
+        println!("  codex-shim init --setup");
+    }
+
+    Ok(())
+}
+
+struct ProfileDefaults {
+    base_url: String,
+    chat_path: String,
+    responses_path: String,
+    api_key_env: String,
+}
+
+fn profile_defaults(profile_name: &str) -> ProfileDefaults {
+    match profile_name {
+        "deepseek-chat" | "deepseek" => ProfileDefaults {
+            base_url: "https://api.deepseek.com".into(),
+            chat_path: "/chat/completions".into(),
+            responses_path: "/responses".into(),
+            api_key_env: "DEEPSEEK_API_KEY".into(),
+        },
+        "openrouter-chat" | "openrouter-responses" => ProfileDefaults {
+            base_url: "https://openrouter.ai/api/v1".into(),
+            chat_path: "/chat/completions".into(),
+            responses_path: "/responses".into(),
+            api_key_env: "OPENROUTER_API_KEY".into(),
+        },
+        "ollama-chat" | "ollama-responses" => ProfileDefaults {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            chat_path: "/chat/completions".into(),
+            responses_path: "/responses".into(),
+            api_key_env: "OLLAMA_API_KEY".into(),
+        },
+        "groq-chat" | "groq-responses" => ProfileDefaults {
+            base_url: "https://api.groq.com/openai/v1".into(),
+            chat_path: "/chat/completions".into(),
+            responses_path: "/responses".into(),
+            api_key_env: "GROQ_API_KEY".into(),
+        },
+        "fireworks-chat" | "fireworks-responses" => ProfileDefaults {
+            base_url: "https://api.fireworks.ai/inference/v1".into(),
+            chat_path: "/chat/completions".into(),
+            responses_path: "/responses".into(),
+            api_key_env: "FIREWORKS_API_KEY".into(),
+        },
+        "xai-chat" | "xai-responses" => ProfileDefaults {
+            base_url: "https://api.x.ai/v1".into(),
+            chat_path: "/chat/completions".into(),
+            responses_path: "/responses".into(),
+            api_key_env: "XAI_API_KEY".into(),
+        },
+        "together-chat" => ProfileDefaults {
+            base_url: "https://api.together.xyz/v1".into(),
+            chat_path: "/chat/completions".into(),
+            responses_path: "/responses".into(),
+            api_key_env: "TOGETHER_API_KEY".into(),
+        },
+        "alibaba-chat" | "alibaba-responses" => ProfileDefaults {
+            base_url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1".into(),
+            chat_path: "/chat/completions".into(),
+            responses_path: "/responses".into(),
+            api_key_env: "DASHSCOPE_API_KEY".into(),
+        },
+        "gemini-chat" => ProfileDefaults {
+            base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
+            chat_path: "/chat/completions".into(),
+            responses_path: "/responses".into(),
+            api_key_env: "GEMINI_API_KEY".into(),
+        },
+        "vertex-chat" => ProfileDefaults {
+            base_url: "https://aiplatform.googleapis.com/v1".into(),
+            chat_path: "/chat/completions".into(),
+            responses_path: "/responses".into(),
+            api_key_env: "GOOGLE_API_KEY".into(),
+        },
+        "moonshot-chat" => ProfileDefaults {
+            base_url: "https://api.moonshot.cn/v1".into(),
+            chat_path: "/chat/completions".into(),
+            responses_path: "/responses".into(),
+            api_key_env: "MOONSHOT_API_KEY".into(),
+        },
+        "minimax-chat" => ProfileDefaults {
+            base_url: "https://api.minimax.chat/v1".into(),
+            chat_path: "/chat/completions".into(),
+            responses_path: "/responses".into(),
+            api_key_env: "MINIMAX_API_KEY".into(),
+        },
+        "zai-chat" => ProfileDefaults {
+            base_url: "https://api.z.ai/v1".into(),
+            chat_path: "/chat/completions".into(),
+            responses_path: "/responses".into(),
+            api_key_env: "ZAI_API_KEY".into(),
+        },
+        "bedrock-chat" | "bedrock-responses" => ProfileDefaults {
+            base_url: "https://bedrock-runtime.us-east-1.amazonaws.com".into(),
+            chat_path: "/chat/completions".into(),
+            responses_path: "/responses".into(),
+            api_key_env: "AWS_ACCESS_KEY_ID".into(),
+        },
+        "vllm-chat" | "vllm-responses" => ProfileDefaults {
+            base_url: "http://127.0.0.1:8000/v1".into(),
+            chat_path: "/chat/completions".into(),
+            responses_path: "/responses".into(),
+            api_key_env: "VLLM_API_KEY".into(),
+        },
+        "sglang-chat" | "sglang" => ProfileDefaults {
+            base_url: "http://127.0.0.1:30000/v1".into(),
+            chat_path: "/chat/completions".into(),
+            responses_path: "/responses".into(),
+            api_key_env: "SGLANG_API_KEY".into(),
+        },
+        "llamacpp-chat" | "llamacpp-responses" => ProfileDefaults {
+            base_url: "http://127.0.0.1:8080/v1".into(),
+            chat_path: "/chat/completions".into(),
+            responses_path: "/responses".into(),
+            api_key_env: "LLAMACPP_API_KEY".into(),
+        },
+        _ => ProfileDefaults {
+            base_url: "https://api.example.com/v1".into(),
+            chat_path: "/chat/completions".into(),
+            responses_path: "/responses".into(),
+            api_key_env: "PROVIDER_API_KEY".into(),
+        },
+    }
+}
+
+// ── setup ────────────────────────────────────────────────────────
+
+async fn cmd_setup(config_path: Option<&str>, start: bool, dry_run: bool) -> anyhow::Result<()> {
+    let config = Config::load(config_path).with_context(|| {
+        if let Some(path) = config_path {
+            format!("failed to load shim config from {}", path)
+        } else {
+            "failed to load shim config from --config or the default ~/.codex-shim/config.yaml"
+                .to_string()
+        }
+    })?;
+    config.validate().with_context(
+        || "shim config is not ready for Codex installation; fix issues in config.yaml first",
+    )?;
+
+    println!("✓ Config loaded and validated");
+
+    // Generate catalog
+    let caps = configured_profile_caps(&config);
+    let catalog = build_model_catalog(&config.models.catalog, &caps);
+
+    // Resolve codex home
+    let codex_home = resolve_codex_home(None)?;
+    let catalog_path = codex_home.join("model-catalog-shim.json");
+    let config_toml_path = codex_home.join("config.toml");
+
+    if dry_run {
+        println!();
+        println!("Dry run — would perform the following actions:");
+        println!("  Write model catalog:  {}", catalog_path.display());
+        println!("  Update Codex config:  {}", config_toml_path.display());
+        println!("  Model:                {}", config.models.default);
+        println!("  Provider ID:          codex_shim");
+        println!("  Base URL:             http://127.0.0.1:8787/v1");
+        if start {
+            println!("  Start server:         yes (on 127.0.0.1:8787)");
+        }
+        return Ok(());
+    }
+
+    // Create codex home if needed
+    std::fs::create_dir_all(&codex_home)
+        .with_context(|| format!("failed to create CODEX_HOME at {}", codex_home.display()))?;
+
+    // Write catalog
+    {
+        if let Some(parent) = catalog_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut rendered = serde_json::to_string_pretty(&catalog)?;
+        rendered.push('\n');
+        std::fs::write(&catalog_path, rendered).with_context(|| {
+            format!(
+                "failed to write model catalog to {}",
+                catalog_path.display()
+            )
+        })?;
+        println!("✓ Wrote model catalog: {}", catalog_path.display());
+    }
+
+    // Update Codex config.toml
+    {
+        update_codex_config_toml(
+            &config_toml_path,
+            "codex_shim",
+            &config.models.default,
+            &catalog_path,
+            "http://127.0.0.1:8787/v1",
+            None,
+            Some("disabled"),
+        )?;
+        println!("✓ Updated Codex config: {}", config_toml_path.display());
+    }
+
+    println!();
+    println!("Setup complete!");
+    if start {
+        println!();
+        println!("Starting server...");
+        // We need to construct a temporary Cli-like structure for run_server
+        // Instead, just run the server directly
+        let listen_addr = config.server.listen.clone();
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .init();
+        tracing::info!(
+            listen = %listen_addr,
+            provider = %config.provider.kind,
+            upstream = %config.upstream.base_url,
+            "Starting codex-shim"
+        );
+        let app = codex_shim::app(config)?;
+        let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
+        axum::serve(listener, app).await?;
+    } else {
+        println!(
+            "Next: export {}='sk-...' && codex-shim --config {}",
+            config.upstream.api_key_env,
+            config_path.unwrap_or("~/.codex-shim/config.yaml")
+        );
+    }
+
     Ok(())
 }
 

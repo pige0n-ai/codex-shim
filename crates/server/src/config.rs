@@ -489,7 +489,7 @@ fn expand_tilde_with_home(path: &str, home: Option<&Path>) -> PathBuf {
     PathBuf::from(path)
 }
 
-pub(crate) fn expand_tilde(path: &str) -> PathBuf {
+pub fn expand_tilde(path: &str) -> PathBuf {
     expand_tilde_with_home(path, home_dir().as_deref())
 }
 
