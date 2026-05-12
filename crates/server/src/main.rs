@@ -1033,7 +1033,7 @@ async fn cmd_init(
     let default_ctx = meta.default_context_window.to_string();
     let ctx_str = inquire::Text::new("Context window tokens:")
         .with_default(&default_ctx)
-        .with_help_message("Supports suffixes: k=1000, K=1024, m=1M, M=1MiB")
+        .with_help_message("Supports suffixes: k=1,000, K=1,024, m/M=1,000,000")
         .prompt()?;
     let context_window: i64 =
         protocol::models::parse_context_window(&ctx_str).unwrap_or(meta.default_context_window);

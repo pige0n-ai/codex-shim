@@ -74,13 +74,9 @@ pub fn parse_context_window(input: &str) -> Result<i64, String> {
     } else if let Some(rest) = s.strip_suffix('k') {
         (rest, 1_000)
     } else if let Some(rest) = s.strip_suffix('M') {
-        (rest, 1_048_576)
+        (rest, 1_000_000)
     } else if let Some(rest) = s.strip_suffix('m') {
         (rest, 1_000_000)
-    } else if let Some(rest) = s.strip_suffix('G') {
-        (rest, 1_073_741_824)
-    } else if let Some(rest) = s.strip_suffix('g') {
-        (rest, 1_000_000_000)
     } else {
         (s, 1)
     };
@@ -276,18 +272,8 @@ mod context_window_tests {
     }
 
     #[test]
-    fn uppercase_m_is_mebibyte() {
-        assert_eq!(parse_context_window("1M").unwrap(), 1_048_576);
-    }
-
-    #[test]
-    fn lowercase_g_is_billion() {
-        assert_eq!(parse_context_window("1g").unwrap(), 1_000_000_000);
-    }
-
-    #[test]
-    fn uppercase_g_is_gibibyte() {
-        assert_eq!(parse_context_window("1G").unwrap(), 1_073_741_824);
+    fn uppercase_m_is_million() {
+        assert_eq!(parse_context_window("1M").unwrap(), 1_000_000);
     }
 
     #[test]
