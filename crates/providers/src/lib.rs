@@ -6,12 +6,16 @@ use serde::{Deserialize, Serialize};
 mod deepseek;
 mod generic;
 mod passthrough;
+mod profile_meta;
 mod sglang;
 mod vllm;
 
 pub use deepseek::DeepSeekProvider;
 pub use generic::GenericProvider;
 pub use passthrough::PassthroughProvider;
+pub use profile_meta::{
+    ProfileCategory, ProfileMeta, all_profile_metadata, get_profile_meta, profiles_by_category,
+};
 pub use sglang::SglangProvider;
 pub use vllm::VllmProvider;
 
