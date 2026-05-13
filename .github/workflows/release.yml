@@ -112,7 +112,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/${{ matrix.cli_bin }}" "dist/${{ matrix.cli_bin }}"
+          EXT=""
+          [[ "${{ matrix.cli_bin }}" == *.exe ]] && EXT=".exe"
+          cp "target/${{ matrix.target }}/release/${{ matrix.cli_bin }}" "dist/codex-shim-${{ matrix.target }}${EXT}"
 
       - name: Package refs.zip (Linux CLI only)
         if: matrix.is_musl && needs.detect.outputs.build-gui == 'false'
@@ -127,7 +129,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp "gui/src-tauri/target/${{ matrix.target }}/release/${{ matrix.gui_bin }}" "dist/${{ matrix.gui_bin }}"
+          EXT=""
+          [[ "${{ matrix.gui_bin }}" == *.exe ]] && EXT=".exe"
+          cp "gui/src-tauri/target/${{ matrix.target }}/release/${{ matrix.gui_bin }}" "dist/codex-shim-gui-${{ matrix.target }}${EXT}"
 
       - uses: actions/upload-artifact@v4
         with:
