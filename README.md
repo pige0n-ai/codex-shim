@@ -60,6 +60,16 @@ Linux `x86_64` (musl static), macOS `x86_64`/`aarch64`, Windows `x86_64`.
 For Codex desktop, logout if you have already login, then login with any (dummy) 
 API key instead of ChatGPT's authentication.
 
+If you are using Codex Desktop on Windows while setting the agent environment as
+WSL, you should download both releases for Windows and Linux. The Windows binary
+would install the config to the config.toml, while the Linux binary in WSL set
+with the same config should be run to bind the listen address. This is caused by
+Codex's request routing through WSL, though respecting Window's configuration.
+Meanwhile, combination as such would require you to set the `model_catalog_json`
+to the path of WSL mounting Windows' one, e.g.,
+`/mnt/C/Users/<your-username>/.codex/model-catalog-shim.json`. We may enhance
+this experience by adding an option to ask WSL-enablement upon setup in the future.
+
 ### Interactive Setup
 
 ```bash
