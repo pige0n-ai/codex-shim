@@ -56,7 +56,7 @@ pub async fn create_response(
         .and_then(|v| serde_json::to_string(v).ok())
         .map(|s| s.len())
         .unwrap_or(0);
-    tracing::warn!(
+    tracing::info!(
         %model, %stream, %prev_id, %tool_count, %input_len,
         "Incoming request"
     );
@@ -282,7 +282,7 @@ async fn handle_stream(
         .map_err(|e| record_error(ApiError::upstream_error(format!("{e}"))))?;
 
     let status = upstream_resp.status().as_u16();
-    tracing::warn!(%status, "Upstream response status");
+    tracing::info!(%status, "Upstream response status");
     if status >= 400 {
         let body = upstream_resp.text().await.unwrap_or_default();
         tracing::warn!(%status, %body, "Upstream error response");
@@ -329,7 +329,7 @@ async fn handle_stream(
         let mut chunk_count: u64 = 0;
         let mut text_bytes: u64 = 0;
 
-        tracing::warn!("Starting to read upstream SSE stream");
+        tracing::info!("Starting to read upstream SSE stream");
 
         while let Some(event_result) = sse_stream.next().await {
             match event_result {
@@ -389,11 +389,16 @@ async fn handle_stream(
         }
 
         let reasoning_len = stream_state.reasoning_content.len();
-        tracing::warn!(
+        let usage = stream_state.final_usage();
+        tracing::info!(
             %chunk_count, %text_bytes,
             has_tool = stream_state.tool_call_active,
             %reasoning_len,
             finish = ?stream_state.finish_reason,
+            input_tokens = usage.map(|u| u.input_tokens),
+            output_tokens = usage.map(|u| u.output_tokens),
+            total_tokens = usage.map(|u| u.total_tokens),
+            reasoning_tokens = usage.and_then(|u| u.output_tokens_details.as_ref().and_then(|d| d.reasoning_tokens)),
             "Stream completed"
         );
 
