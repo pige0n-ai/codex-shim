@@ -111,23 +111,31 @@ jobs:
         if: matrix.cli_bin != '' && needs.detect.outputs.build-gui == 'false'
         shell: bash
         run: |
-          python scripts/package_release.py \
-            --binary "target/${{ matrix.target }}/release/${{ matrix.cli_bin }}" \
-            --name "codex-shim" \
-            --target "${{ matrix.target }}" \
-            --version "${{ needs.detect.outputs.release-tag }}" \
-            --output-dir dist
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${{ matrix.cli_bin }}" "dist/${{ matrix.cli_bin }}"
+
+      - name: Package refs.zip (Linux CLI only)
+        if: matrix.is_musl && needs.detect.outputs.build-gui == 'false'
+        shell: bash
+        run: |
+          python -c "
+import zipfile, os
+with zipfile.ZipFile('dist/refs.zip', 'w', zipfile.ZIP_DEFLATED) as zf:
+    for f in ['README.md', 'LICENSE']:
+        zf.write(f, f)
+    for root, _, files in os.walk('examples'):
+        for fn in files:
+            fp = os.path.join(root, fn)
+            zf.write(fp, fp)
+"
+
 
       - name: Package GUI
         if: matrix.gui_bin != '' && needs.detect.outputs.build-gui == 'true'
         shell: bash
         run: |
-          python scripts/package_release.py \
-            --binary "gui/src-tauri/target/${{ matrix.target }}/release/${{ matrix.gui_bin }}" \
-            --name "codex-shim-gui" \
-            --target "${{ matrix.target }}" \
-            --version "${{ needs.detect.outputs.release-tag }}" \
-            --output-dir dist
+          mkdir -p dist
+          cp "gui/src-tauri/target/${{ matrix.target }}/release/${{ matrix.gui_bin }}" "dist/${{ matrix.gui_bin }}"
 
       - uses: actions/upload-artifact@v4
         with:
