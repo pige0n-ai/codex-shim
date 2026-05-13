@@ -57,6 +57,9 @@ Linux `x86_64` (musl static), macOS `x86_64`/`aarch64`, Windows `x86_64`.
 
 ## Quick Start
 
+For Codex desktop, logout if you have already login, then login with any (dummy) 
+API key instead of ChatGPT's authentication.
+
 ### Interactive Setup
 
 ```bash
