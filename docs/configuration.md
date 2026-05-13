@@ -1,27 +1,18 @@
-# Configuration Guide
+# Configuration Reference
 
-Start here if you already have a `codex-shim` release archive and want the
-fastest path to a working setup.
+Everything `config.yaml` controls, from minimal to full. For CLI command
+details, see [cli.md](cli.md). For desktop app setup, see [desktop.md](desktop.md).
 
-## The Fast Path: Interactive Setup
+## Minimal Config
 
-```bash
-./codex-shim init --setup
-```
-
-This single command handles everything: choose a provider, configure your model,
-write the minimal config, install Codex startup files, and start the server.
-No YAML editing required.
-
-## The Manual Path: Minimal Config
-
-If you prefer to write the config yourself, a minimal config only needs three sections:
+A working config needs only three sections. Use `codex-shim setup` to generate
+one interactively, or write it by hand:
 
 ```yaml
 provider:
-  kind: deepseek-chat        # pick from 27 built-in profiles
+  kind: deepseek-chat
   profile_config:
-    profile: deepseek-chat   # same as provider.kind
+    profile: deepseek-chat
 
 upstream:
   api_key_env: DEEPSEEK_API_KEY
@@ -33,453 +24,163 @@ models:
       context_window: 131072
 ```
 
+`provider.kind` picks from [27 built-in profiles](provider-compatibility.md).
 All other fields (`server.listen`, `reasoning.*`, `state.*`, `logging.*`) use
-sensible built-in defaults derived from your chosen provider profile.
+sensible defaults from the chosen profile.
 
-Then validate and start:
+Validate and install:
 
 ```bash
 ./codex-shim validate
 export DEEPSEEK_API_KEY="sk-..."
-./codex-shim setup --start
+./codex-shim integrate --start
 ```
 
-## The Full Reference
-
-If you need fine-grained control over every option, keep reading.
-
-If you are targeting the Codex desktop app instead of only the CLI, also read
-[docs/desktop.md](/home/vivec/codex-shim/docs/desktop.md). Desktop support has a
-stricter project/trust contract than the basic CLI flow.
-
-The sections below start with the 5-minute setup flow, then explain the config
-layers and precedence rules in more detail.
-
-## First-Time Setup In 5 Minutes
-
-This example uses `examples/deepseek-chat/config.yaml`, but the same flow works
-for other bundled profiles.
-
-### 1. Start from a bundled example
-
-Use the release archive you unpacked earlier. Do not write a fresh shim YAML
-from scratch for your first setup.
-
-Pick one of these starting points:
-
-- hosted Chat Completions provider: `examples/deepseek-chat/config.yaml`
-- stateless Responses provider: `examples/openrouter-responses/config.yaml`
-- local OSS provider: `examples/ollama-chat/config.yaml`
-
-For the full built-in profile matrix, including which providers have native
-`/responses`, how streaming usage behaves, and which examples use
-`auth_command`, see
-[docs/provider-compatibility.md](/home/vivec/codex-shim/docs/provider-compatibility.md).
-
-### 2. Copy the shim config to its normal location
-
-macOS / Linux:
-
-```bash
-mkdir -p ~/.codex-shim
-cp examples/deepseek-chat/config.yaml ~/.codex-shim/config.yaml
-```
-
-Windows PowerShell:
-
-```powershell
-New-Item -ItemType Directory -Force "$HOME\.codex-shim" | Out-Null
-Copy-Item .\examples\deepseek-chat\config.yaml "$HOME\.codex-shim\config.yaml"
-```
-
-You can also keep the file inside the unpacked release directory and pass
-`--config /path/to/config.yaml` explicitly. Copying it to the default path is
-usually simpler for day-to-day use.
-
-### 3. Edit only the minimum fields
-
-For a first working setup, only change:
-
-- `upstream.api_key_env`
-- `models.default`
-- `models.catalog[*].slug`
-
-Keep `models.default` equal to the catalog slug.
-
-For example:
-
-```yaml
-upstream:
-  api_key_env: "DEEPSEEK_API_KEY"
-
-models:
-  default: "deepseek-v4-pro"
-  catalog:
-    - slug: "deepseek-v4-pro"
-      context_window: 131072
-```
-
-Do not change `provider.profile_config.profile` unless you are deliberately
-switching to a different provider preset.
-
-### 4. Export the upstream API key
-
-For a local loopback shim, you usually only need the upstream provider key.
-
-macOS / Linux:
-
-```bash
-export DEEPSEEK_API_KEY="sk-..."
-```
-
-Windows PowerShell:
-
-```powershell
-$env:DEEPSEEK_API_KEY = "sk-..."
-```
-
-If you later decide to protect Codex → shim with bearer auth, reinstall with:
-
-```bash
-./codex-shim install-codex-config --config /absolute/path/to/config.yaml --env-key LOCAL_SHIM_TOKEN
-```
-
-### 5. Start the shim
-
-If you copied the config to the default path:
-
-```bash
-./codex-shim
-```
-
-If you kept the config somewhere else:
-
-```bash
-./codex-shim --config /absolute/path/to/config.yaml
-```
-
-The default config path is:
-
-- macOS / Linux: `~/.codex-shim/config.yaml`
-- Windows: `%USERPROFILE%\.codex-shim\config.yaml`
-
-### 6. Install the matching Codex startup config
-
-Run:
-
-```bash
-./codex-shim install-codex-config --config /absolute/path/to/config.yaml
-```
-
-That command writes:
-
-- `$CODEX_HOME/model-catalog-shim.json`
-- `$CODEX_HOME/config.toml`
-- `$CODEX_HOME/config.toml.bak.0` ... `.bak.3` rolling backups when `config.toml` already exists
-
-For a first setup, keep the Codex `model` equal to the shim `models.default`.
-You only need `--model ...` when the same shim YAML advertises more than one
-catalog entry and you want a different default.
-
-For the Codex desktop app, prefer the project-scoped install flow instead:
-
-```bash
-./codex-shim install-codex-config \
-  --config /absolute/path/to/config.yaml \
-  --project-dir /absolute/path/to/repo \
-  --trust-project
-```
-
-That writes:
-
-- `<repo>/.codex/config.toml`
-- `<repo>/.codex/codex-shim/model-catalog.json`
-- a trusted-project entry in the global Codex config when `--trust-project` is used
-
-Validate the desktop wiring with:
-
-```bash
-./codex-shim doctor desktop \
-  --config /absolute/path/to/config.yaml \
-  --project-dir /absolute/path/to/repo
-```
-
-### 7. Run Codex
-
-```bash
-codex
-```
-
-If requests reach the shim but fail upstream, the first things to check are:
-
-- the upstream API key env var name in `upstream.api_key_env`
-- the upstream model slug in `models.default` and `models.catalog[*].slug`
-- the Codex `model` value in `$CODEX_HOME/config.toml`
-
-## Validating Your Config
-
-Before starting the shim, you can validate your config offline:
-
-```bash
-./codex-shim validate                            # check syntax and logic
-./codex-shim validate --config path/to/config.yaml
-./codex-shim validate --check-upstream            # also probe upstream connectivity
-```
-
-The validator checks:
-- YAML syntax and schema
-- `models.catalog` is populated and `models.default` resolves to a catalog entry
-- `server.base_path` is `/v1` (required)
-- No legacy `features.*` block
-- Consistency between `provider.kind` and `profile_config.profile`
-- Consistency between `reasoning.enabled` and model `reasoning_levels`
-
-Non-zero exit code means there is a problem to fix before starting the server.
-
-## Before You Customize Anything
-
-These defaults are intentional:
-
-- keep `wire_api = "responses"` in Codex
-- keep `supports_websockets = false`
-- keep top-level Codex `web_search = "disabled"` unless your chosen shim
-  profile really supports hosted search through a Responses upstream
-- leave `profile_config.capabilities` alone unless you are correcting a known
-  provider quirk
-- leave `reasoning.enabled` alone until the basic request path works
-
-Once the basic path works, move on to the reference sections below.
-
-## The Three Configuration Layers
-
-### 1. Codex config: `$CODEX_HOME/config.toml`
-
-This is consumed by Codex itself.
-
-It answers:
-
-- which provider ID should Codex use
-- what base URL should Codex call
-- what default model name should Codex request
-- whether Codex should use Responses or WebSockets
-
-Typical fields:
-
-- `model_provider`
-- `model`
-- `model_catalog_json`
-- `web_search`
-- `model_providers.<id>.base_url`
-- `model_providers.<id>.env_key` if you want Codex → shim bearer auth
-- `model_providers.<id>.wire_api`
-- `model_providers.<id>.supports_websockets`
-
-Use [examples/codex-config/config.toml](/home/vivec/codex-shim/examples/codex-config/config.toml)
-as the starting point, or let `codex-shim install-codex-config` write it.
-
-### 2. Shim config: `config.yaml`
-
-This is consumed by `codex-shim`.
-
-It answers:
-
-- where the shim should listen
-- which upstream provider API it should call
-- how it should authenticate upstream requests
-- which provider behavior preset it should use
-- which models it should advertise through `/models`
-
-Typical top-level blocks:
-
-- `server`
-- `upstream`
-- `provider`
-- `models`
-- `reasoning`
-- `state`
-- `logging`
-
-Use one of the files in `examples/<profile>/config.yaml` as the starting point.
-
-### 3. Shim model catalog: `models.catalog`
-
-This lives inside the shim YAML, but it deserves to be thought of separately.
-
-It is the source of truth for the shim-native `/models` endpoint.
-Current Codex also needs a startup snapshot of that catalog through top-level
-`model_catalog_json` if you want correct custom-model metadata at startup and
-working `/model` picker entries.
-
-It answers:
-
-- what model slugs Codex should see
-- what context window each model should advertise
-- whether each model should appear to support reasoning, search, images, patch
-  editing, and so on
-
-This is not fetched from the upstream provider automatically.
-
-## End-To-End Setup Flow
-
-### Step 1. Pick a provider profile
-
-Choose the shim profile that matches the upstream API shape you want to use.
-
-Examples:
-
-- `deepseek-chat`
-- `gemini-chat`
-- `moonshot-chat`
-- `openrouter-chat`
-- `openrouter-responses`
-- `fireworks-responses`
-- `vllm-responses`
-- `ollama-chat`
-- `ollama-responses`
-- `generic-chat`
-
-The profile controls the shim's runtime behavior:
-
-- chat shim vs native Responses vs stateless Responses
-- reasoning extraction policy
-- tool behavior defaults
-- whether `previous_response_id` is local-only or upstream-native
-
-This is configured under:
+## Provider Profiles
+
+`profile_config` is the runtime adapter preset — it controls **how** the shim
+talks to the upstream (endpoint mode, reasoning policy, tool policy, state
+policy). It is not the model catalog itself.
+
+| Field | Purpose |
+|-------|---------|
+| `provider.kind` | Legacy shortcut. When both are set, `profile_config.profile` wins. |
+| `provider.profile_config.profile` | Real source of truth for shim behavior |
+| `provider.profile_config.capabilities` | Override individual capability flags |
+| `provider.profile_config.extra_body` | Inject fields into upstream request bodies |
+
+### Capability Overrides
 
 ```yaml
 provider:
-  kind: deepseek-chat
   profile_config:
     profile: deepseek-chat
+    capabilities:
+      supports_hosted_web_search: false
+      supports_streaming_usage: true
+    extra_body:
+      enable_thinking: true
 ```
 
-## Step 2. Configure the upstream provider
+### `kind` vs `profile_config` Precedence
 
-Point the shim at the real upstream API:
+If both are set but differ, `validate` will warn. In `setup`-generated configs,
+only `profile_config.profile` is set. Prefer `profile_config.profile`.
+
+## Model Catalog
+
+`models.catalog` is the source of truth for `/models`. Tells Codex what models
+exist, their capabilities, and context windows.
+
+### Required per entry
+
+- `slug` — the model name Codex uses in requests
+- `context_window` — token limit. Supports suffixes: `128K` (131072),
+  `1M` (1048576), `1m` (1000000). Lowercase = decimal, uppercase = binary.
+
+### Commonly set per entry
+
+- `display_name`, `description`, `priority`
+- `reasoning_levels` — e.g. `[high, xhigh]`. Defaults from profile capabilities.
+- `tool_calling`, `vision` — default from profile capabilities.
+- `supports_search_tool` — must be `true` for hosted web search profiles.
+
+### Alignment Rule
+
+These three must agree:
+1. Codex `config.toml` → `model`
+2. Shim YAML → `models.default`
+3. Shim YAML → at least one `models.catalog[*].slug`
+
+## Upstream Configuration
 
 ```yaml
 upstream:
   base_url: "https://api.deepseek.com"
-  chat_path: "/chat/completions"
-  responses_path: "/responses"
+  chat_path: "/chat/completions"     # default
+  responses_path: "/responses"       # default
   api_key_env: "DEEPSEEK_API_KEY"
+  requires_openai_auth: false        # skip adapter-side Bearer injection
 ```
 
-This layer is only about shim → upstream.
-
-It has nothing to do with Codex's own `config.toml`.
-
-## Step 3. Describe the model catalog
-
-Add at least one model entry:
+For auth via external command:
 
 ```yaml
-models:
-  default: "deepseek-v4-pro"
-  catalog:
-    - slug: "deepseek-v4-pro"
-      context_window: 131072
-      reasoning_levels:
-        - high
+upstream:
+  auth_command:
+    command: "/usr/local/bin/fetch-token"
+    args: ["--audience", "codex"]
 ```
 
-`models.catalog` is required. The shim validates this at startup.
+## Server & Listen Address
 
-### What you usually must write manually
+```yaml
+server:
+  listen: "127.0.0.1:8787"   # default
+  base_path: "/v1"            # required, do not change
+```
 
-- `slug`
-- `context_window`
+`server.listen` controls where the shim binds. When running `integrate`, it is
+read from config and used to construct the `base_url` in Codex `config.toml`
+(`http://{listen}/v1`). The `setup` wizard asks for this value during
+configuration.
 
-### What you usually should write manually
-
-- `display_name`
-- `description`
-- `priority`
-- `base_instructions`
-- `auto_compact_token_limit`
-
-### What can default from the provider profile
-
-- `tool_calling`
-- `vision`
-- `reasoning_levels`
-
-If omitted:
-
-- `tool_calling` defaults from the provider capability preset
-- `vision` defaults from the provider capability preset
-- `reasoning_levels` defaults to `["high"]` when the profile supports
-  reasoning effort, otherwise `[]`
-
-### Model name alignment
-
-Keep these three values aligned:
-
-1. Codex `config.toml`: top-level `model`
-2. shim YAML: `models.default`
-3. shim YAML: at least one `models.catalog[*].slug`
-
-If they drift apart, Codex may ask for a model name that the shim does not
-advertise through `/models`.
-
-## Step 4. Configure reasoning
-
-The `reasoning` block controls shim runtime defaults:
+## Reasoning
 
 ```yaml
 reasoning:
-  enabled: false
-  effort: high
+  enabled: false     # runtime default
+  effort: high       # xhigh, high, medium, low
 ```
 
-This is separate from catalog metadata.
-
-### Important distinction
-
-- `reasoning.enabled` controls runtime/default shim behavior
+- `reasoning.enabled` controls runtime shim defaults
 - `models.catalog[*].reasoning_levels` tells Codex what the model supports
 
-So these are valid and mean different things:
+They can differ: a model can be advertised as reasoning-capable while the shim
+defaults to disabled.
+
+## Other Blocks
 
 ```yaml
-reasoning:
-  enabled: false
+state:
+  backend: sqlite             # default
 
-models:
-  catalog:
-    - slug: "deepseek-v4-pro"
-      context_window: 131072
-      reasoning_levels: [high]
+logging:
+  level: info                 # debug, info, warn, error
 ```
 
-This means:
+Defaults work for most setups.
 
-- the model is advertised to Codex as reasoning-capable
-- but the shim's runtime default starts from reasoning disabled
-
-If you want Codex to treat the model as non-reasoning, set:
-
-```yaml
-reasoning_levels: []
-```
-
-explicitly in the catalog entry.
-
-## Step 5. Configure Codex
-
-The preferred path is:
+## Validation
 
 ```bash
-codex-shim install-codex-config --config ~/.codex-shim/config.yaml
+./codex-shim validate                          # syntax + logic
+./codex-shim validate --config path/to/config.yaml
+./codex-shim validate --check-upstream         # also probe upstream connectivity
 ```
 
-If you need to inspect the shape it writes, it looks like:
+Checks: YAML syntax, catalog populated, `models.default` resolves, `base_path`
+is `/v1`, no legacy `features.*`, `kind`/`profile_config` consistency,
+reasoning consistency. Non-zero exit on errors — CI-friendly.
+
+## Codex Integration
+
+Generate Codex startup files from your shim config:
+
+```bash
+codex-shim integrate --config ~/.codex-shim/config.yaml
+```
+
+Writes `$CODEX_HOME/model-catalog-shim.json` and updates `$CODEX_HOME/config.toml`
+(with `.bak.0`–`.bak.3` rolling backups). The `base_url` in the resulting
+`config.toml` is constructed from `server.listen`.
+
+Resulting Codex `config.toml` shape:
 
 ```toml
 model_provider = "codex_shim"
 model = "deepseek-v4-pro"
-model_catalog_json = "/absolute/path/to/$CODEX_HOME/model-catalog-shim.json"
+model_catalog_json = "/path/to/$CODEX_HOME/model-catalog-shim.json"
 web_search = "disabled"
 
 [model_providers.codex_shim]
@@ -489,151 +190,44 @@ wire_api = "responses"
 supports_websockets = false
 ```
 
-This layer is only about Codex → shim.
+Key rules:
+- `wire_api = "responses"` is the only supported protocol.
+- `supports_websockets = false` is required (HTTP/SSE only).
+- `web_search = "disabled"` for Chat upstreams. Native Responses profiles may use `cached`/`live`.
+- Omit `env_key` for local loopback. Add it only for bearer-protected or remote shim gateways.
 
-Add `env_key = "LOCAL_SHIM_TOKEN"` only when you want bearer auth on that hop.
+## Desktop Project Config
 
-It does not replace the shim YAML.
-
-## Step 6. Export credentials
-
-For a local loopback shim, you typically only need one environment variable:
-
-1. shim → upstream API key
-
-Example:
+For the Codex desktop app, prefer project-scoped install:
 
 ```bash
-export DEEPSEEK_API_KEY="sk-..."
+codex-shim integrate \
+  --config ~/.codex-shim/config.yaml \
+  --project-dir /path/to/repo \
+  --trust-project
 ```
 
-If you do enable Codex → shim bearer auth, then add:
+Validates with:
 
 ```bash
-export LOCAL_SHIM_TOKEN="local-shim-dev-token"
+codex-shim doctor desktop \
+  --config ~/.codex-shim/config.yaml \
+  --project-dir /path/to/repo
 ```
 
-That token is only for Codex calling the shim. It is never forwarded upstream.
+See [desktop.md](desktop.md) for the full desktop support contract.
 
-## Step 7. Start the shim
+## Precedence Rules (Summary)
 
-```bash
-./codex-shim --config examples/deepseek-chat/config.yaml
-```
-
-Then run Codex normally:
-
-```bash
-codex
-```
-
-## Provider Configuration: `kind` vs `profile_config`
-
-There are two provider fields in the config, but only one matters for runtime behavior:
-
-- `provider.profile_config.profile` — the **real source of truth** for shim behavior
-- `provider.kind` — a **legacy shortcut**; if `profile_config` is present, `profile_config.profile` takes precedence
-
-When both are set but differ, `codex-shim validate` will warn you.
-
-In minimal configs and `init`-generated configs, only `profile_config.profile` is set.
-
-## What `profile_config` Actually Does
-
-`profile_config` is the shim's runtime adapter preset.
-
-It is not:
-
-- a Codex config block
-- the model catalog itself
-- upstream model metadata
-
-It is how the shim decides how to behave toward the upstream provider.
-
-Example:
-
-```yaml
-provider:
-  kind: openrouter-responses
-  profile_config:
-    profile: openrouter-responses
-    capabilities:
-      supports_hosted_web_search: false
-    extra_body:
-      enable_thinking: true
-```
-
-This controls:
-
-- endpoint mode
-- reasoning policy
-- tool policy
-- state policy
-- fine-grained capability overrides
-- extra request body fields injected upstream
-
-`profile_config` influences the default values used when the shim builds
-`/models`, but it does not replace `models.catalog`.
-
-## Conflict And Precedence Rules
-
-These layers are conceptually separate, but you can still configure them
-in contradictory ways.
-
-### Prefer `profile_config.profile` over `provider.kind`
-
-`provider.kind` exists as a legacy shortcut.
-
-If `provider.profile_config` is present, treat `profile_config.profile` as the
-real source of truth for runtime behavior.
-
-### `models.catalog` overrides profile-derived defaults
-
-If you explicitly set fields like:
-
-- `tool_calling`
-- `vision`
-- `reasoning_levels`
-
-then those explicit values win over the provider capability defaults.
-
-### Codex `model` must match the shim catalog
-
-Codex only knows what the shim advertises through `/models`.
-
-So if Codex requests:
-
-```toml
-model = "foo"
-```
-
-but the shim only advertises:
-
-```yaml
-models:
-  catalog:
-    - slug: "bar"
-```
-
-then your setup is inconsistent.
-
-## Recommended Starting Pattern
-
-For most users, the safest flow is:
-
-1. copy a bundled `examples/<profile>/config.yaml`
-2. change only:
-   - `upstream.api_key_env`
-   - `models.default`
-   - `models.catalog[*].slug`
-3. run `codex-shim install-codex-config --config ~/.codex-shim/config.yaml`
-4. keep the Codex `model` equal to the shim `models.default`
-5. only touch `profile_config.capabilities` if you are intentionally overriding
-   a built-in preset
+1. `profile_config.profile` > `provider.kind` for runtime behavior.
+2. Explicit `models.catalog[*]` fields > profile-derived defaults.
+3. Codex `model` must exist in the shim catalog.
+4. `reasoning.enabled` (runtime) is independent of catalog `reasoning_levels` (capability declaration).
 
 ## Related Files
 
-- [README.md](/home/vivec/codex-shim/README.md)
-- [examples/all-options.yaml](/home/vivec/codex-shim/examples/all-options.yaml)
-- [examples/codex-config/config.toml](/home/vivec/codex-shim/examples/codex-config/config.toml)
-- [docs/e2e.md](/home/vivec/codex-shim/docs/e2e.md)
+- [CLI Reference](cli.md)
+- [Provider Compatibility](provider-compatibility.md)
+- [Desktop Support](desktop.md)
+- [E2E Testing](e2e.md)
+- `examples/all-options.yaml` — every config key with comments

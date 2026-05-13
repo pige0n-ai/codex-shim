@@ -75,40 +75,6 @@ enum Commands {
         #[arg(long)]
         reasoning_levels: Option<String>,
     },
-    /// Write a startup model catalog into CODEX_HOME and update Codex config.toml
-    #[command(visible_alias = "inject-codex-config")]
-    InstallCodexConfig {
-        /// Codex default model slug. Defaults to models.default from the shim config.
-        #[arg(long)]
-        model: Option<String>,
-        /// Override the provider profile used to render model metadata.
-        #[arg(long)]
-        profile: Option<String>,
-        /// Custom provider ID to create under [model_providers].
-        #[arg(long, default_value = "codex_shim")]
-        provider_id: String,
-        /// Codex home directory. Defaults to $CODEX_HOME or ~/.codex.
-        #[arg(long)]
-        codex_home: Option<String>,
-        /// Project directory for Codex desktop project-scoped config.
-        #[arg(long)]
-        project_dir: Option<String>,
-        /// Mark the project as trusted in the global Codex config.
-        #[arg(long)]
-        trust_project: bool,
-        /// Path to the startup model catalog JSON. Relative paths are resolved inside CODEX_HOME.
-        #[arg(long)]
-        catalog_path: Option<String>,
-        /// Base URL Codex should call for the local shim.
-        #[arg(long, default_value = "http://127.0.0.1:8787/v1")]
-        base_url: String,
-        /// Optional env var Codex should use for the shim bearer token.
-        #[arg(long)]
-        env_key: Option<String>,
-        /// Optional Codex top-level web_search mode: disabled, cached, or live.
-        #[arg(long)]
-        web_search: Option<String>,
-    },
     /// Explain what a model catalog JSON means to Codex
     ExplainCatalog {
         /// Path to the model catalog JSON file
@@ -140,20 +106,25 @@ enum Commands {
         #[arg(long)]
         check_upstream: bool,
     },
-    /// Interactive setup wizard: choose a provider profile, configure models, and write a minimal config.
-    Init {
+    /// Interactive setup wizard with step-by-step output.
+    /// Walks through provider, model, API key, and listen address.
+    Setup {
         /// Path where the generated config YAML will be written.
         #[arg(long, default_value = "~/.codex-shim/config.yaml")]
         output: String,
         /// Non-interactive mode: accept all defaults without prompting.
         #[arg(long)]
         non_interactive: bool,
-        /// If set, automatically run `setup` after writing the config.
-        #[arg(long)]
-        setup: bool,
+        /// After writing config, validate and install Codex startup files.
+        #[arg(long, conflicts_with = "yolo")]
+        integrate: bool,
+        /// After writing config, validate, install Codex files, and start the server.
+        #[arg(long, conflicts_with = "integrate")]
+        yolo: bool,
     },
-    /// One-shot command: validate config, install Codex startup catalog, and optionally start the server.
-    Setup {
+    /// Validate config and install Codex startup catalog + update config.toml.
+    /// Reads server.listen from config to construct the Codex base_url.
+    Integrate {
         /// Path to config YAML file. Uses --config or default path if omitted.
         #[arg(short, long)]
         config: Option<String>,
@@ -163,18 +134,30 @@ enum Commands {
         /// Print what would be done without actually writing or starting anything.
         #[arg(long)]
         dry_run: bool,
-    },
-    /// End-to-end setup wizard: init, validate, install Codex config, optionally start server.
-    Quickstart {
-        /// Path where the generated config YAML will be written.
-        #[arg(long, default_value = "~/.codex-shim/config.yaml")]
-        output: String,
-        /// Non-interactive mode: accept all defaults without prompting.
+        /// Codex default model slug. Defaults to models.default from the shim config.
         #[arg(long)]
-        non_interactive: bool,
-        /// Start the shim server after setup.
+        model: Option<String>,
+        /// Override the provider profile used to render model metadata.
         #[arg(long)]
-        start: bool,
+        profile: Option<String>,
+        /// Custom provider ID to create under [model_providers].
+        #[arg(long, default_value = "codex_shim")]
+        provider_id: String,
+        /// Codex home directory. Defaults to $CODEX_HOME or ~/.codex.
+        #[arg(long)]
+        codex_home: Option<String>,
+        /// Project directory for Codex desktop project-scoped config.
+        #[arg(long)]
+        project_dir: Option<String>,
+        /// Mark the project as trusted in the global Codex config.
+        #[arg(long)]
+        trust_project: bool,
+        /// Optional env var Codex should use for the shim bearer token.
+        #[arg(long)]
+        env_key: Option<String>,
+        /// Optional Codex top-level web_search mode: disabled, cached, or live.
+        #[arg(long)]
+        web_search: Option<String>,
     },
     /// Inspect resolved configuration (with all defaults expanded).
     ConfigShow {
@@ -225,30 +208,7 @@ async fn main() -> anyhow::Result<()> {
             vision,
             reasoning_levels.as_deref(),
         ),
-        Some(Commands::InstallCodexConfig {
-            model,
-            profile,
-            provider_id,
-            codex_home,
-            project_dir,
-            trust_project,
-            catalog_path,
-            base_url,
-            env_key,
-            web_search,
-        }) => cmd_install_codex_config(
-            cli.config.as_deref(),
-            model.as_deref(),
-            profile.as_deref(),
-            &provider_id,
-            codex_home.as_deref(),
-            project_dir.as_deref(),
-            trust_project,
-            catalog_path.as_deref(),
-            &base_url,
-            env_key.as_deref(),
-            web_search.as_deref(),
-        ),
+
         Some(Commands::ExplainCatalog { path }) => cmd_explain_catalog(&path),
         Some(Commands::Probe {
             profile: _,
@@ -273,21 +233,50 @@ async fn main() -> anyhow::Result<()> {
             config,
             check_upstream,
         }) => cmd_validate(config.as_deref().or(cli.config.as_deref()), check_upstream).await,
-        Some(Commands::Init {
+        Some(Commands::Setup {
             output,
             non_interactive,
-            setup,
-        }) => cmd_init(&output, non_interactive, setup, cli.config.as_deref()).await,
-        Some(Commands::Setup {
+            integrate,
+            yolo,
+        }) => {
+            cmd_setup(
+                &output,
+                non_interactive,
+                integrate,
+                yolo,
+                cli.config.as_deref(),
+            )
+            .await
+        }
+        Some(Commands::Integrate {
             config,
             start,
             dry_run,
-        }) => cmd_setup(config.as_deref().or(cli.config.as_deref()), start, dry_run).await,
-        Some(Commands::Quickstart {
-            output,
-            non_interactive,
-            start,
-        }) => cmd_quickstart(&output, non_interactive, start, cli.config.as_deref()).await,
+            model,
+            profile,
+            provider_id,
+            codex_home,
+            project_dir,
+            trust_project,
+            env_key,
+            web_search,
+        }) => {
+            cmd_integrate(
+                config.as_deref().or(cli.config.as_deref()),
+                start,
+                dry_run,
+                model.as_deref(),
+                profile.as_deref(),
+                &provider_id,
+                codex_home.as_deref(),
+                project_dir.as_deref(),
+                trust_project,
+                env_key.as_deref(),
+                web_search.as_deref(),
+            )
+            .await
+        }
+
         Some(Commands::ConfigShow { format }) => cmd_config_show(cli.config.as_deref(), &format),
         None => run_server(&cli).await,
     }
@@ -904,10 +893,11 @@ async fn check_upstream_connectivity(config: &Config, api_key: Option<&str>) -> 
 
 // ── init ─────────────────────────────────────────────────────────
 
-async fn cmd_init(
+async fn cmd_setup(
     output: &str,
     non_interactive: bool,
-    setup: bool,
+    integrate: bool,
+    yolo: bool,
     _global_config: Option<&str>,
 ) -> anyhow::Result<()> {
     use providers::{ProfileCategory, preset_capabilities, profiles_by_category};
@@ -927,12 +917,12 @@ async fn cmd_init(
     }
 
     if non_interactive {
-        return cmd_init_non_interactive(&output_path).await;
+        return cmd_setup_non_interactive(&output_path).await;
     }
 
     println!();
     println!("╔══════════════════════════════════════════════════════════╗");
-    println!("║          codex-shim Interactive Setup Wizard            ║");
+    println!("║          codex-shim Setup Wizard                       ║");
     println!("╚══════════════════════════════════════════════════════════╝");
     println!();
 
@@ -1007,7 +997,24 @@ async fn cmd_init(
             .prompt()?
     };
 
-    // Step 5: Model configuration
+    // Step 5: Listen address
+    let listen_addr = inquire::Text::new("Listen address (host:port):")
+        .with_default("127.0.0.1:8787")
+        .with_help_message(
+            "Where the shim server will listen. Used as Codex base_url in config.toml.",
+        )
+        .with_validator(|val: &str| {
+            if val.contains(':') && !val.is_empty() {
+                Ok(inquire::validator::Validation::Valid)
+            } else {
+                Ok(inquire::validator::Validation::Invalid(
+                    "Enter a valid host:port (e.g. 127.0.0.1:8787)".into(),
+                ))
+            }
+        })
+        .prompt()?;
+
+    // Step 6: Model configuration
     let caps = preset_capabilities(&profile_name)
         .unwrap_or_else(protocol::provider_caps::ProviderCapabilities::generic_chat);
 
@@ -1056,7 +1063,7 @@ async fn cmd_init(
         "high".to_string()
     };
 
-    // Step 6: Probe (optional, for non-local providers with API key set)
+    // Step 7: Probe (optional, for non-local providers with API key set)
     if meta.requires_api_key && std::env::var(&api_key_env).is_ok() {
         let do_probe = inquire::Confirm::new("Probe upstream connectivity now?")
             .with_default(true)
@@ -1070,7 +1077,7 @@ async fn cmd_init(
         }
     }
 
-    // Step 7: Generate slim config
+    // Step 8: Generate slim config
     let config_yaml = generate_slim_config(
         &profile_name,
         &api_key_env,
@@ -1079,9 +1086,10 @@ async fn cmd_init(
         reasoning_enabled,
         &reasoning_effort,
         custom_base_url.as_deref(),
+        &listen_addr,
     );
 
-    // Step 8: Show summary and confirm
+    // Step 9: Show summary and confirm
     let defaults = profile_defaults(&profile_name);
     let effective_base_url = custom_base_url.as_deref().unwrap_or(&defaults.base_url);
     let key_status = if std::env::var(&api_key_env).is_ok() {
@@ -1114,7 +1122,7 @@ async fn cmd_init(
         }
     );
     println!("│  State:       {:<27}│", "adapter memory store");
-    println!("│  Listen:      {:<27}│", "127.0.0.1:8787");
+    println!("│  Listen:      {:<27}│", listen_addr);
     println!("╰───────────────────────────────────────────╯");
     println!();
 
@@ -1140,28 +1148,60 @@ async fn cmd_init(
     config.validate()?;
     println!("✓ Config validation passed");
 
-    if setup {
+    if integrate || yolo {
         println!();
-        println!("Running setup...");
-        cmd_setup(Some(output_path.to_string_lossy().as_ref()), true, false).await?;
+        println!("Integrating...");
+        let base_url = format!("http://{}/v1", listen_addr);
+        cmd_install_codex_config(
+            Some(output_path.to_string_lossy().as_ref()),
+            None,
+            None,
+            "codex_shim",
+            None,
+            None,
+            false,
+            None,
+            &base_url,
+            None,
+            None,
+        )?;
+        if yolo {
+            let config = Config::load(Some(output_path.to_string_lossy().as_ref()))?;
+            let addr = config.server.listen.clone();
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::INFO)
+                .init();
+            tracing::info!(listen = %addr, provider = %config.provider.kind, "Starting codex-shim");
+            let app = codex_shim::app(config)?;
+            let listener = tokio::net::TcpListener::bind(&addr).await?;
+            axum::serve(listener, app).await?;
+        }
     } else {
         println!();
         println!("Next steps:");
-        println!("  1. Export your API key:  export {api_key_env}=\"sk-...\"");
+        let export_line = format!("export {}=\"sk-...\"", api_key_env);
+        println!("  1. Export your API key:  {}", export_line);
         println!(
-            "  2. Run setup:            codex-shim setup --config {} --start",
+            "  2. Install Codex config:  codex-shim integrate --config {}",
+            output_path.display()
+        );
+        println!(
+            "  3. Start the shim:        codex-shim --config {}",
             output_path.display()
         );
         println!();
         println!("Or run everything in one step:");
-        println!("  codex-shim quickstart");
+        println!(
+            "  codex-shim integrate --config {} --start",
+            output_path.display()
+        );
     }
 
     Ok(())
 }
 
-/// Non-interactive init: accept all defaults, write a deepseek-chat config.
-async fn cmd_init_non_interactive(output_path: &Path) -> anyhow::Result<()> {
+/// Non-interactive setup: accept all defaults, write a deepseek-chat config.
+async fn cmd_setup_non_interactive(output_path: &Path) -> anyhow::Result<()> {
     use providers::preset_capabilities;
 
     let profile_name = "deepseek-chat".to_string();
@@ -1182,14 +1222,14 @@ async fn cmd_init_non_interactive(output_path: &Path) -> anyhow::Result<()> {
     let reasoning_enabled = caps.supports_reasoning_effort;
 
     let config_yaml = format!(
-        r#"# codex-shim config — generated by `codex-shim init`
+        r#"# codex-shim config - generated by `codex-shim setup`
 # Profile: {profile_name}
 #
 # Minimal config. All omitted fields use built-in defaults for this profile.
 # See: examples/all-options.yaml for the full reference.
 
 server:
-  listen: "{listen}"
+  listen: "{listen_addr}"
 
 upstream:
   base_url: "{base_url}"
@@ -1219,7 +1259,7 @@ logging:
   level: info
 "#,
         profile_name = profile_name,
-        listen = "127.0.0.1:8787",
+        listen_addr = "127.0.0.1:8787",
         base_url = default_upstream.base_url,
         chat_path = default_upstream.chat_path,
         responses_path = default_upstream.responses_path,
@@ -1261,6 +1301,7 @@ logging:
 }
 
 /// Generate a slim config YAML that only contains user-specified fields.
+#[allow(clippy::too_many_arguments)]
 fn generate_slim_config(
     profile_name: &str,
     api_key_env: &str,
@@ -1269,16 +1310,23 @@ fn generate_slim_config(
     reasoning_enabled: bool,
     reasoning_effort: &str,
     custom_base_url: Option<&str>,
+    listen_addr: &str,
 ) -> String {
     let upstream_section = if let Some(url) = custom_base_url {
         format!(
-            r#"upstream:
+            r#"server:
+  listen: "{listen_addr}"
+
+upstream:
   base_url: "{url}"
   api_key_env: "{api_key_env}""#,
         )
     } else {
         format!(
-            r#"upstream:
+            r#"server:
+  listen: "{listen_addr}"
+
+upstream:
   api_key_env: "{api_key_env}""#,
         )
     };
@@ -1317,7 +1365,7 @@ fn generate_slim_config(
     };
 
     format!(
-        r#"# codex-shim config — generated by `codex-shim init`
+        r#"# codex-shim config - generated by `codex-shim setup`
 # Profile: {profile_name}
 # See: codex-shim config show --yaml  for the full resolved config
 
@@ -1476,7 +1524,20 @@ fn profile_defaults(profile_name: &str) -> ProfileDefaults {
 
 // ── setup ────────────────────────────────────────────────────────
 
-async fn cmd_setup(config_path: Option<&str>, start: bool, dry_run: bool) -> anyhow::Result<()> {
+#[allow(clippy::too_many_arguments, unused_variables)]
+async fn cmd_integrate(
+    config_path: Option<&str>,
+    start: bool,
+    dry_run: bool,
+    model: Option<&str>,
+    profile: Option<&str>,
+    provider_id: &str,
+    codex_home: Option<&str>,
+    project_dir: Option<&str>,
+    trust_project: bool,
+    env_key: Option<&str>,
+    web_search: Option<&str>,
+) -> anyhow::Result<()> {
     let config = Config::load(config_path).with_context(|| {
         if let Some(path) = config_path {
             format!("failed to load shim config from {}", path)
@@ -1507,9 +1568,9 @@ async fn cmd_setup(config_path: Option<&str>, start: bool, dry_run: bool) -> any
         println!("  Update Codex config:  {}", config_toml_path.display());
         println!("  Model:                {}", config.models.default);
         println!("  Provider ID:          codex_shim");
-        println!("  Base URL:             http://127.0.0.1:8787/v1");
+        println!("  Base URL:             http://{}/v1", config.server.listen);
         if start {
-            println!("  Start server:         yes (on 127.0.0.1:8787)");
+            println!("  Start server:         yes (on {})", config.server.listen);
         }
         return Ok(());
     }
@@ -1536,12 +1597,13 @@ async fn cmd_setup(config_path: Option<&str>, start: bool, dry_run: bool) -> any
 
     // Update Codex config.toml
     {
+        let base_url = format!("http://{}/v1", config.server.listen);
         update_codex_config_toml(
             &config_toml_path,
             "codex_shim",
             &config.models.default,
             &catalog_path,
-            "http://127.0.0.1:8787/v1",
+            &base_url,
             None,
             Some("disabled"),
         )?;
@@ -1574,81 +1636,6 @@ async fn cmd_setup(config_path: Option<&str>, start: bool, dry_run: bool) -> any
             config.upstream.api_key_env,
             config_path.unwrap_or("~/.codex-shim/config.yaml")
         );
-    }
-
-    Ok(())
-}
-
-async fn cmd_quickstart(
-    output: &str,
-    non_interactive: bool,
-    start: bool,
-    global_config: Option<&str>,
-) -> anyhow::Result<()> {
-    println!("╔══════════════════════════════════════════════════════════╗");
-    println!("║          codex-shim Quickstart Wizard                  ║");
-    println!("╚══════════════════════════════════════════════════════════╝");
-    println!();
-
-    // Step 1: Init
-    println!("Step 1/3: Configure codex-shim");
-    println!("─────────────────────────────");
-    cmd_init(output, non_interactive, false, global_config).await?;
-    println!();
-
-    let config_path = codex_shim::config::expand_tilde(output);
-
-    // Step 2: Validate
-    println!("Step 2/3: Validate configuration");
-    println!("─────────────────────────────────");
-    match cmd_validate(Some(config_path.to_string_lossy().as_ref()), false).await {
-        Ok(()) => println!("✓ Validation passed"),
-        Err(e) => {
-            eprintln!("⚠ Validation warning: {e}");
-            println!("  You can fix this later. Continuing...");
-        }
-    }
-    println!();
-
-    // Step 3: Install Codex config
-    println!("Step 3/3: Install Codex configuration");
-    println!("───────────────────────────────────────");
-    cmd_install_codex_config(
-        Some(config_path.to_string_lossy().as_ref()),
-        None,
-        None,
-        "codex_shim",
-        None,
-        None,
-        false,
-        None,
-        "http://127.0.0.1:8787/v1",
-        None,
-        None,
-    )?;
-    println!();
-
-    // Summary
-    println!("╔══════════════════════════════════════════════════════════╗");
-    println!("║  Quickstart Complete!                                    ║");
-    println!("╚══════════════════════════════════════════════════════════╝");
-    println!();
-
-    if start {
-        println!("Starting shim server...");
-        cmd_setup(Some(config_path.to_string_lossy().as_ref()), true, false).await?;
-    } else {
-        let config = Config::load(Some(config_path.to_string_lossy().as_ref()))?;
-        println!("Next steps:");
-        println!(
-            "  1. Export your API key:  export {}=\"sk-...\"",
-            config.upstream.api_key_env
-        );
-        println!(
-            "  2. Start the shim:       codex-shim --config {}",
-            config_path.display()
-        );
-        println!("  3. Run Codex:            codex");
     }
 
     Ok(())
