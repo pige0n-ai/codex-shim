@@ -278,7 +278,26 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Some(Commands::ConfigShow { format }) => cmd_config_show(cli.config.as_deref(), &format),
-        None => run_server(&cli).await,
+        None => {
+            // When run without any subcommand and without an explicit --config,
+            // if the default config doesn't exist, launch the setup wizard.
+            {
+                let needs_setup = cli.config.is_none()
+                    && codex_shim::config::default_config_path()
+                        .map(|p| !p.exists())
+                        .unwrap_or(false);
+                if needs_setup {
+                    let default_path = codex_shim::config::default_config_path().unwrap();
+                    println!(
+                        "No config found at {}. Launching setup wizard...",
+                        default_path.display()
+                    );
+                    println!();
+                    return cmd_setup("~/.codex-shim/config.yaml", false, false, true, None).await;
+                }
+            }
+            run_server(&cli).await
+        }
     }
 }
 
