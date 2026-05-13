@@ -654,7 +654,7 @@ fn default_config_path_for_home(home: Option<&Path>) -> Option<PathBuf> {
     home.map(|home| home.join(".codex-shim").join("config.yaml"))
 }
 
-pub(crate) fn default_config_path() -> Option<PathBuf> {
+pub fn default_config_path() -> Option<PathBuf> {
     default_config_path_for_home(home_dir().as_deref())
 }
 
