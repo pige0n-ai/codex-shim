@@ -38,6 +38,7 @@ pub fn app_with_metrics(config: Config, metrics: Arc<RuntimeMetrics>) -> anyhow:
     config.validate()?;
     let store_backend: Box<dyn crate::store::ResponseStoreBackend> =
         match config.state.backend.as_str() {
+            "memory" | "ram" => Box::new(crate::store::MemoryStore::new(config.state.ttl_seconds)),
             #[cfg(feature = "sqlite")]
             "sqlite" => {
                 let db_path = config
@@ -55,7 +56,14 @@ pub fn app_with_metrics(config: Config, metrics: Arc<RuntimeMetrics>) -> anyhow:
                         .expect("Failed to open SQLite store"),
                 )
             }
-            _ => Box::new(crate::store::MemoryStore::new(config.state.ttl_seconds)),
+            #[cfg(not(feature = "sqlite"))]
+            "sqlite" => anyhow::bail!(
+                "state.backend = sqlite requires building codex-shim with the `sqlite` feature"
+            ),
+            other => anyhow::bail!(
+                "unsupported state.backend `{}`; expected `memory`, `ram`, or `sqlite`",
+                other
+            ),
         };
     let store = Arc::new(ResponseStore::new(store_backend, config.state.ttl_seconds));
     let upstream = Arc::new(UpstreamClient::new(config.upstream.clone())?);
@@ -127,6 +135,8 @@ pub fn app_with_metrics(config: Config, metrics: Arc<RuntimeMetrics>) -> anyhow:
             "/v1/responses/{id}",
             get(routes::get_response).delete(routes::delete_response),
         )
+        .route("/v1/responses/{id}/debug", get(routes::get_response_debug))
+        .route("/responses/{id}/debug", get(routes::get_response_debug))
         .layer(from_fn(move |req, next| {
             auth::auth_middleware(auth_config, req, next)
         }))

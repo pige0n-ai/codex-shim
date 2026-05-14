@@ -107,6 +107,37 @@ mod tests {
     }
 
     #[test]
+    fn local_shell_call_arguments_are_valid_json() {
+        let req = ResponsesCreateRequest {
+            model: "test".into(),
+            input: ResponseInput::Items(vec![InputItem::LocalShellCall {
+                id: None,
+                call_id: "call_shell".into(),
+                command: "python fixture.py".into(),
+                cwd: Some("/tmp/project".into()),
+                timeout_ms: Some(1000),
+            }]),
+            ..default_req()
+        };
+
+        let canonical = CanonicalRequest::from_request(&req, vec![]).unwrap();
+        let chat = canonical.into_chat_request(&ProviderCapabilities::generic_chat());
+
+        let ChatMessage::Assistant {
+            tool_calls: Some(tool_calls),
+            ..
+        } = &chat.messages[0]
+        else {
+            panic!("expected assistant tool call");
+        };
+        let args: serde_json::Value =
+            serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
+        assert_eq!(args["command"], "python fixture.py");
+        assert_eq!(args["cwd"], "/tmp/project");
+        assert_eq!(args["timeout_ms"], 1000);
+    }
+
+    #[test]
     fn into_native_responses_json_basic() {
         let req = ResponsesCreateRequest {
             model: "test".into(),

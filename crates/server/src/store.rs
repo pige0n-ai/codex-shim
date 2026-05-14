@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+#[cfg(feature = "sqlite")]
+use std::path::Path;
 use std::sync::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -17,6 +19,12 @@ pub struct StoredResponse {
     pub request_json: Value,
     pub response_json: Value,
     pub canonical_messages: Vec<ChatMessage>,
+    /// Raw upstream SSE event payloads captured for streamed responses.
+    #[serde(default)]
+    pub upstream_sse_events: Vec<Value>,
+    /// Responses SSE event payloads emitted by the shim.
+    #[serde(default)]
+    pub response_sse_events: Vec<Value>,
     /// Optional conversation grouping (populated by store v2 backends).
     #[serde(default)]
     pub conversation_id: Option<String>,
@@ -129,7 +137,7 @@ pub struct SqliteStore {
 
 #[cfg(feature = "sqlite")]
 impl SqliteStore {
-    pub fn new(path: &str, ttl_seconds: u64) -> anyhow::Result<Self> {
+    pub fn new(path: impl AsRef<Path>, ttl_seconds: u64) -> anyhow::Result<Self> {
         let conn = rusqlite::Connection::open(path)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS responses (
@@ -141,6 +149,8 @@ impl SqliteStore {
                 request_json TEXT NOT NULL,
                 response_json TEXT NOT NULL,
                 canonical_messages_json TEXT NOT NULL,
+                upstream_sse_events_json TEXT NOT NULL DEFAULT '[]',
+                response_sse_events_json TEXT NOT NULL DEFAULT '[]',
                 expires_at INTEGER
             );
             CREATE TABLE IF NOT EXISTS tool_reasoning (
@@ -157,6 +167,14 @@ impl SqliteStore {
                 ON responses(conversation_id);
             ",
         )?;
+        let _ = conn.execute(
+            "ALTER TABLE responses ADD COLUMN upstream_sse_events_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE responses ADD COLUMN response_sse_events_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        );
         Ok(Self {
             conn: std::sync::Mutex::new(conn),
             ttl: Duration::from_secs(ttl_seconds),
@@ -174,15 +192,20 @@ impl ResponseStoreBackend for SqliteStore {
         let msgs_json = serde_json::to_string(&record.canonical_messages).unwrap_or_default();
         let req_json = serde_json::to_string(&record.request_json).unwrap_or_default();
         let resp_json = serde_json::to_string(&record.response_json).unwrap_or_default();
+        let upstream_sse_json =
+            serde_json::to_string(&record.upstream_sse_events).unwrap_or_default();
+        let response_sse_json =
+            serde_json::to_string(&record.response_sse_events).unwrap_or_default();
         let expires_at = record.created_at + self.ttl.as_secs() as i64;
 
         let conn = self.conn.lock().unwrap();
         let _ = conn.execute(
-            "INSERT OR REPLACE INTO responses (id, conversation_id, model, created_at, status, request_json, response_json, canonical_messages_json, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT OR REPLACE INTO responses (id, conversation_id, model, created_at, status, request_json, response_json, canonical_messages_json, upstream_sse_events_json, response_sse_events_json, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             rusqlite::params![
                 record.id, conv_id, record.model, record.created_at,
-                record.status, req_json, resp_json, msgs_json, expires_at
+                record.status, req_json, resp_json, msgs_json, upstream_sse_json,
+                response_sse_json, expires_at
             ],
         );
     }
@@ -190,12 +213,14 @@ impl ResponseStoreBackend for SqliteStore {
     fn get(&self, id: &str) -> Option<StoredResponse> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
-            .prepare("SELECT id, conversation_id, model, created_at, status, request_json, response_json, canonical_messages_json FROM responses WHERE id = ?1")
+            .prepare("SELECT id, conversation_id, model, created_at, status, request_json, response_json, canonical_messages_json, upstream_sse_events_json, response_sse_events_json FROM responses WHERE id = ?1")
             .ok()?;
         let row = stmt
             .query_row(rusqlite::params![id], |row| {
                 let msgs_json: String = row.get(7)?;
                 let msgs: Vec<ChatMessage> = serde_json::from_str(&msgs_json).unwrap_or_default();
+                let upstream_sse_json: String = row.get(8)?;
+                let response_sse_json: String = row.get(9)?;
                 Ok(StoredResponse {
                     id: row.get(0)?,
                     conversation_id: row.get(1)?,
@@ -207,6 +232,10 @@ impl ResponseStoreBackend for SqliteStore {
                     response_json: serde_json::from_str(&row.get::<_, String>(6)?)
                         .unwrap_or_default(),
                     canonical_messages: msgs,
+                    upstream_sse_events: serde_json::from_str(&upstream_sse_json)
+                        .unwrap_or_default(),
+                    response_sse_events: serde_json::from_str(&response_sse_json)
+                        .unwrap_or_default(),
                 })
             })
             .ok()?;
@@ -363,6 +392,8 @@ mod tests {
             request_json: serde_json::json!({"input": "hello"}),
             response_json: serde_json::json!({"output": "world"}),
             canonical_messages: vec![],
+            upstream_sse_events: vec![],
+            response_sse_events: vec![],
             conversation_id: None,
         };
 
@@ -389,6 +420,8 @@ mod tests {
             request_json: serde_json::json!({}),
             response_json: serde_json::json!({}),
             canonical_messages: vec![],
+            upstream_sse_events: vec![],
+            response_sse_events: vec![],
             conversation_id: None,
         };
         store.put(record);
@@ -424,6 +457,8 @@ mod tests {
             request_json: serde_json::json!({}),
             response_json: serde_json::json!({}),
             canonical_messages: vec![msg],
+            upstream_sse_events: vec![],
+            response_sse_events: vec![],
             conversation_id: Some("conv-1".into()),
         };
         store.put(record);
@@ -448,11 +483,48 @@ mod tests {
             request_json: serde_json::json!({}),
             response_json: serde_json::json!({}),
             canonical_messages: vec![],
+            upstream_sse_events: vec![],
+            response_sse_events: vec![],
             conversation_id: None,
         });
 
         assert_eq!(store.len(), 1);
         let got = store.get("rs-1").unwrap();
         assert_eq!(got.id, "rs-1");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_store_round_trips_sse_events() {
+        let path =
+            std::env::temp_dir().join(format!("codex-shim-store-{}.db", uuid::Uuid::new_v4()));
+        let store = SqliteStore::new(&path, 3600).expect("sqlite store");
+
+        store.put(StoredResponse {
+            id: "sqlite-sse-1".into(),
+            model: "m".into(),
+            created_at: 1,
+            status: "completed".into(),
+            request_json: serde_json::json!({"input": "hello"}),
+            response_json: serde_json::json!({"id": "sqlite-sse-1"}),
+            canonical_messages: vec![],
+            upstream_sse_events: vec![serde_json::json!({"id": "chunk-1"})],
+            response_sse_events: vec![serde_json::json!({"type": "response.completed"})],
+            conversation_id: None,
+        });
+
+        assert!(path.exists());
+        let got = store.get("sqlite-sse-1").expect("stored response");
+        assert_eq!(
+            got.upstream_sse_events,
+            vec![serde_json::json!({"id": "chunk-1"})]
+        );
+        assert_eq!(
+            got.response_sse_events,
+            vec![serde_json::json!({"type": "response.completed"})]
+        );
+
+        drop(store);
+        let _ = std::fs::remove_file(path);
     }
 }

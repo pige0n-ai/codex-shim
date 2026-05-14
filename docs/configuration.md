@@ -143,7 +143,8 @@ defaults to disabled.
 
 ```yaml
 state:
-  backend: sqlite             # default
+  backend: memory             # memory/ram, or sqlite when the binary has sqlite support
+  sqlite_path: ~/.codex-shim/store.db  # optional; used only with backend: sqlite
 
 logging:
   level: info                 # debug, info, warn, error

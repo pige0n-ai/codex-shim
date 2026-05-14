@@ -240,6 +240,8 @@ async fn handle_non_stream(
         request_json: serde_json::to_value(&req).unwrap_or_default(),
         response_json: serde_json::to_value(&response_object).unwrap_or_default(),
         canonical_messages,
+        upstream_sse_events: vec![],
+        response_sse_events: vec![],
     });
     state.metrics.set_store_size(state.store.len());
     state
@@ -326,6 +328,8 @@ async fn handle_stream(
 
         futures::pin_mut!(sse_stream);
         let mut response_body = serde_json::Value::Null;
+        let mut upstream_sse_events: Vec<serde_json::Value> = Vec::new();
+        let mut response_sse_events: Vec<serde_json::Value> = Vec::new();
         let mut chunk_count: u64 = 0;
         let mut text_bytes: u64 = 0;
 
@@ -337,15 +341,23 @@ async fn handle_stream(
                     let data = event.data;
 
                     if data == "[DONE]" {
+                        upstream_sse_events.push(serde_json::json!({"data": "[DONE]"}));
                         for event in stream_state.complete() {
                             // Capture the completed response JSON for store
                             if let ResponseSseEvent::ResponseCompleted { ref response } = event {
                                 response_body = serde_json::to_value(response).unwrap_or_default();
                             }
+                            response_sse_events
+                                .push(serde_json::to_value(&event).unwrap_or_default());
                             let _ = tx.send(Ok(event)).await;
                         }
                         break;
                     }
+
+                    upstream_sse_events.push(
+                        serde_json::from_str::<serde_json::Value>(&data)
+                            .unwrap_or_else(|_| serde_json::json!({ "data": data.clone() })),
+                    );
 
                     match serde_json::from_str::<protocol::chat::ChatCompletionChunk>(&data) {
                         Ok(chunk) => {
@@ -359,15 +371,18 @@ async fn handle_stream(
                             match stream_state.process_chunk(&chunk) {
                                 Ok(events) => {
                                     for event in events {
+                                        response_sse_events
+                                            .push(serde_json::to_value(&event).unwrap_or_default());
                                         if tx.send(Ok(event)).await.is_err() {
                                             return;
                                         }
                                     }
                                 }
                                 Err(e) => {
-                                    let _ = tx
-                                        .send(Ok(ResponseSseEvent::Error { error: e.error }))
-                                        .await;
+                                    let event = ResponseSseEvent::Error { error: e.error };
+                                    response_sse_events
+                                        .push(serde_json::to_value(&event).unwrap_or_default());
+                                    let _ = tx.send(Ok(event)).await;
                                     return;
                                 }
                             }
@@ -378,11 +393,11 @@ async fn handle_stream(
                     }
                 }
                 Err(_e) => {
-                    let _ = tx
-                        .send(Ok(ResponseSseEvent::Error {
-                            error: ApiError::stream_interrupted().error,
-                        }))
-                        .await;
+                    let event = ResponseSseEvent::Error {
+                        error: ApiError::stream_interrupted().error,
+                    };
+                    response_sse_events.push(serde_json::to_value(&event).unwrap_or_default());
+                    let _ = tx.send(Ok(event)).await;
                     return;
                 }
             }
@@ -408,14 +423,7 @@ async fn handle_stream(
         let has_content = !output_text.is_empty() || stream_state.tool_call_active;
         if has_content {
             let tool_calls = if stream_state.tool_call_active {
-                Some(vec![protocol::chat::ChatToolCall {
-                    id: stream_state.tool_call_id.clone().unwrap_or_default(),
-                    call_type: "function".into(),
-                    function: protocol::chat::ChatFunctionCall {
-                        name: stream_state.tool_call_name.clone(),
-                        arguments: stream_state.tool_call_arguments.clone(),
-                    },
-                }])
+                Some(stream_state.chat_tool_calls())
             } else {
                 None
             };
@@ -447,6 +455,8 @@ async fn handle_stream(
             request_json: req_json,
             response_json: response_body,
             canonical_messages: canonical,
+            upstream_sse_events,
+            response_sse_events,
         });
         metrics.set_store_size(store.len());
         metrics.record_request_completed(stream_state.final_usage());
@@ -463,6 +473,16 @@ pub async fn get_response(
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
     match state.store.get(&id) {
         Some(record) => Ok(Json(record.response_json)),
+        None => Err(to_status_json(&ApiError::response_not_found(&id))),
+    }
+}
+
+pub async fn get_response_debug(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<StoredResponse>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    match state.store.get(&id) {
+        Some(record) => Ok(Json(record)),
         None => Err(to_status_json(&ApiError::response_not_found(&id))),
     }
 }
@@ -578,8 +598,14 @@ async fn handle_native_responses(
             futures::pin_mut!(sse_stream);
 
             let mut response_body = serde_json::Value::Null;
+            let mut upstream_sse_events: Vec<serde_json::Value> = Vec::new();
+            let mut response_sse_events: Vec<serde_json::Value> = Vec::new();
             let mut saw_completed = false;
             while let Some(Ok(event)) = sse_stream.next().await {
+                upstream_sse_events.push(
+                    serde_json::from_str::<serde_json::Value>(&event.data)
+                        .unwrap_or_else(|_| serde_json::json!({ "data": event.data.clone() })),
+                );
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&event.data) {
                     if parsed["type"] == "response.completed" {
                         response_body = parsed["response"].clone();
@@ -588,6 +614,7 @@ async fn handle_native_responses(
                     if let Ok(sse_event) =
                         serde_json::from_value::<protocol::sse::ResponseSseEvent>(parsed.clone())
                     {
+                        response_sse_events.push(parsed);
                         let _ = tx.send(Ok(sse_event)).await;
                     }
                 }
@@ -631,6 +658,8 @@ async fn handle_native_responses(
                 request_json: req_json,
                 response_json: response_body.clone(),
                 canonical_messages: canonical_msgs_for_store,
+                upstream_sse_events,
+                response_sse_events,
             });
             metrics.set_store_size(store.len());
             let usage = serde_json::from_value::<protocol::common::Usage>(
@@ -676,6 +705,8 @@ async fn handle_native_responses(
             request_json: serde_json::to_value(&canonical).unwrap_or_default(),
             response_json: response_body.clone(),
             canonical_messages: canonical_msgs,
+            upstream_sse_events: vec![],
+            response_sse_events: vec![],
         });
         state.metrics.set_store_size(state.store.len());
         let usage =

@@ -9,6 +9,7 @@ pub mod reasoning_mapper;
 pub mod response_mapper;
 pub mod sse_mapper;
 pub mod structured_output_mapper;
+pub mod tool_call_normalizer;
 pub mod tool_mapper;
 
 /// Lightweight config decoupling mapper from the providers crate.

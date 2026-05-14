@@ -250,20 +250,31 @@ fn map_input_item_to_message(item: &InputItem) -> Result<ChatMessage, ApiError> 
             reasoning_content: None,
         }),
         InputItem::LocalShellCall {
-            call_id, command, ..
-        } => Ok(ChatMessage::Assistant {
-            content: None,
-            name: None,
-            tool_calls: Some(vec![protocol::chat::ChatToolCall {
-                id: call_id.clone(),
-                call_type: "function".into(),
-                function: protocol::chat::ChatFunctionCall {
-                    name: Some("__codex_local_shell".into()),
-                    arguments: command.clone(),
-                },
-            }]),
-            reasoning_content: None,
-        }),
+            call_id,
+            command,
+            cwd,
+            timeout_ms,
+            ..
+        } => {
+            let args = serde_json::json!({
+                "command": command,
+                "cwd": cwd,
+                "timeout_ms": timeout_ms,
+            });
+            Ok(ChatMessage::Assistant {
+                content: None,
+                name: None,
+                tool_calls: Some(vec![protocol::chat::ChatToolCall {
+                    id: call_id.clone(),
+                    call_type: "function".into(),
+                    function: protocol::chat::ChatFunctionCall {
+                        name: Some("__codex_local_shell".into()),
+                        arguments: serde_json::to_string(&args).unwrap_or_default(),
+                    },
+                }]),
+                reasoning_content: None,
+            })
+        }
         InputItem::ApplyPatchCall {
             call_id,
             patch,

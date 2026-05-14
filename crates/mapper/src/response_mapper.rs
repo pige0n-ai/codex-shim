@@ -6,6 +6,7 @@ use protocol::responses::{
 };
 
 use crate::MappingConfig;
+use crate::tool_call_normalizer::normalize_chat_tool_calls;
 
 /// Map an upstream Chat Completions response back to a Responses API object.
 pub fn map_chat_response_to_responses(
@@ -41,7 +42,7 @@ pub fn map_chat_response_to_responses(
 
     // 2. Emit tool call items
     if let Some(tool_calls) = &msg.tool_calls {
-        for tc in tool_calls {
+        for tc in normalize_chat_tool_calls(tool_calls) {
             let fn_name = tc.function.name.clone().unwrap_or_default();
             output.push(ResponseOutputItem::FunctionCall {
                 id: format!("fc_{}", uuid::Uuid::new_v4()),
@@ -125,7 +126,10 @@ pub fn build_canonical_messages(
         messages.push(ChatMessage::Assistant {
             content: msg.content.clone(),
             name: None,
-            tool_calls: msg.tool_calls.clone(),
+            tool_calls: msg
+                .tool_calls
+                .as_ref()
+                .map(|tool_calls| normalize_chat_tool_calls(tool_calls)),
             reasoning_content: msg.reasoning_content.clone(),
         });
     }

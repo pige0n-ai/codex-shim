@@ -715,11 +715,20 @@ fn map_input_item(item: &InputItem) -> Result<CanonicalItem, String> {
             arguments: serde_json::to_string(input).unwrap_or_default(),
         })),
         InputItem::LocalShellCall {
-            call_id, command, ..
+            call_id,
+            command,
+            cwd,
+            timeout_ms,
+            ..
         } => Ok(CanonicalItem::FunctionCall(CanonicalFunctionCall {
             call_id: call_id.clone(),
             name: "__codex_local_shell".into(),
-            arguments: command.clone(),
+            arguments: serde_json::to_string(&serde_json::json!({
+                "command": command,
+                "cwd": cwd,
+                "timeout_ms": timeout_ms,
+            }))
+            .unwrap_or_default(),
         })),
         InputItem::ApplyPatchCall {
             call_id,

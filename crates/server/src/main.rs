@@ -44,6 +44,9 @@ struct Cli {
     /// State backend to use, for example memory or sqlite.
     #[arg(long)]
     state: Option<String>,
+    /// SQLite state database path when --state sqlite is used.
+    #[arg(long)]
+    sqlite_path: Option<String>,
     /// Toggle provider reasoning defaults: enabled or disabled.
     #[arg(long)]
     thinking: Option<String>,
@@ -329,6 +332,9 @@ async fn run_server(cli: &Cli) -> anyhow::Result<()> {
     }
     if let Some(state) = &cli.state {
         config.state.backend = state.clone();
+    }
+    if let Some(path) = &cli.sqlite_path {
+        config.state.sqlite_path = Some(path.clone());
     }
     if let Some(thinking) = &cli.thinking {
         config.reasoning.enabled = thinking == "enabled";
