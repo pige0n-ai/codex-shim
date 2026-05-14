@@ -139,7 +139,7 @@ fn build_catalog_json(model: &str, with_reasoning: bool) -> serde_json::Value {
             vision: Some(false),
             reasoning_levels,
             priority: Some(10),
-            base_instructions: Some(String::new()),
+            base_instructions: None,
             auto_compact_token_limit: None,
             supports_search_tool: Some(false),
             supports_reasoning_summaries: Some(false),

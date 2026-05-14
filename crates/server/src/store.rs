@@ -404,13 +404,13 @@ impl ResponseStoreBackend for SqliteStore {
         let mut stmt = conn
             .prepare("SELECT tool_call_id, reasoning_content FROM tool_reasoning WHERE conversation_id = ?1")
             .ok();
-        if let Some(ref mut stmt) = stmt {
-            if let Ok(rows) = stmt.query_map(rusqlite::params![conv_id], |row| {
+        if let Some(ref mut stmt) = stmt
+            && let Ok(rows) = stmt.query_map(rusqlite::params![conv_id], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            }) {
-                for row in rows.flatten() {
-                    map.insert(row.0, row.1);
-                }
+            })
+        {
+            for row in rows.flatten() {
+                map.insert(row.0, row.1);
             }
         }
         if let Ok(mut stmt) =

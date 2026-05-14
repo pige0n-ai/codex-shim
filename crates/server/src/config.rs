@@ -584,7 +584,7 @@ impl Config {
                 vision: Some(caps.supports_vision_input),
                 reasoning_levels,
                 priority: Some(10),
-                base_instructions: Some(String::new()),
+                base_instructions: None,
                 auto_compact_token_limit: None,
                 supports_search_tool: Some(false),
                 supports_reasoning_summaries: Some(false),

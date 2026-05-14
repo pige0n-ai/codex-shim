@@ -245,10 +245,10 @@ impl StreamState {
                     self.tool_calls[pos].call_id = Some(id.clone());
                 }
 
-                if let Some(func) = &tc.function {
-                    if let Some(name) = &func.name {
-                        self.tool_calls[pos].name = Some(name.clone());
-                    }
+                if let Some(func) = &tc.function
+                    && let Some(name) = &func.name
+                {
+                    self.tool_calls[pos].name = Some(name.clone());
                 }
                 if emit_added {
                     events.push(ResponseSseEvent::ResponseOutputItemAdded {
@@ -256,15 +256,15 @@ impl StreamState {
                         item: self.tool_calls[pos].output_item("in_progress"),
                     });
                 }
-                if let Some(func) = &tc.function {
-                    if let Some(args) = &func.arguments {
-                        self.tool_calls[pos].arguments.push_str(args);
-                        events.push(ResponseSseEvent::ResponseFunctionCallArgumentsDelta {
-                            item_id: self.tool_calls[pos].item_id.clone(),
-                            output_index: tc.index,
-                            delta: args.clone(),
-                        });
-                    }
+                if let Some(func) = &tc.function
+                    && let Some(args) = &func.arguments
+                {
+                    self.tool_calls[pos].arguments.push_str(args);
+                    events.push(ResponseSseEvent::ResponseFunctionCallArgumentsDelta {
+                        item_id: self.tool_calls[pos].item_id.clone(),
+                        output_index: tc.index,
+                        delta: args.clone(),
+                    });
                 }
 
                 if pos == 0 {
