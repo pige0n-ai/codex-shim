@@ -16,8 +16,18 @@ pub struct StoredResponse {
     pub model: String,
     pub created_at: i64,
     pub status: String,
+    /// Raw request body received by the shim.
     pub request_json: Value,
+    /// Provider-facing request body after Responses→upstream mapping.
+    #[serde(default)]
+    pub mapped_request_json: Value,
     pub response_json: Value,
+    /// Provider error payload/body for failed upstream requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_error: Option<Value>,
+    /// Non-mutating debug hints such as duplicated Codex-generated prologue items.
+    #[serde(default)]
+    pub debug_annotations: Vec<String>,
     pub canonical_messages: Vec<ChatMessage>,
     /// Raw upstream SSE event payloads captured for streamed responses.
     #[serde(default)]
@@ -28,6 +38,24 @@ pub struct StoredResponse {
     /// Optional conversation grouping (populated by store v2 backends).
     #[serde(default)]
     pub conversation_id: Option<String>,
+}
+
+fn reasoning_map_from_messages(messages: &[ChatMessage]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for msg in messages {
+        if let protocol::chat::ChatMessage::Assistant {
+            reasoning_content: Some(rc),
+            tool_calls: Some(tool_calls),
+            ..
+        } = msg
+            && !rc.is_empty()
+        {
+            for tc in tool_calls {
+                map.insert(tc.id.clone(), rc.clone());
+            }
+        }
+    }
+    map
 }
 
 // ── Backend trait ────────────────────────────────────────────────
@@ -122,19 +150,7 @@ impl ResponseStoreBackend for MemoryStore {
         let inner = self.inner.read().unwrap();
         let mut map = HashMap::new();
         for (_id, resp) in inner.iter() {
-            for msg in &resp.canonical_messages {
-                if let protocol::chat::ChatMessage::Assistant {
-                    reasoning_content: Some(rc),
-                    tool_calls: Some(tool_calls),
-                    ..
-                } = msg
-                    && !rc.is_empty()
-                {
-                    for tc in tool_calls {
-                        map.insert(tc.id.clone(), rc.clone());
-                    }
-                }
-            }
+            map.extend(reasoning_map_from_messages(&resp.canonical_messages));
         }
         map
     }
@@ -160,7 +176,10 @@ impl SqliteStore {
                 created_at INTEGER NOT NULL,
                 status TEXT NOT NULL,
                 request_json TEXT NOT NULL,
+                mapped_request_json TEXT NOT NULL DEFAULT 'null',
                 response_json TEXT NOT NULL,
+                upstream_error_json TEXT,
+                debug_annotations_json TEXT NOT NULL DEFAULT '[]',
                 canonical_messages_json TEXT NOT NULL,
                 upstream_sse_events_json TEXT NOT NULL DEFAULT '[]',
                 response_sse_events_json TEXT NOT NULL DEFAULT '[]',
@@ -188,6 +207,18 @@ impl SqliteStore {
             "ALTER TABLE responses ADD COLUMN response_sse_events_json TEXT NOT NULL DEFAULT '[]'",
             [],
         );
+        let _ = conn.execute(
+            "ALTER TABLE responses ADD COLUMN mapped_request_json TEXT NOT NULL DEFAULT 'null'",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE responses ADD COLUMN upstream_error_json TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE responses ADD COLUMN debug_annotations_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        );
         Ok(Self {
             conn: std::sync::Mutex::new(conn),
             ttl: Duration::from_secs(ttl_seconds),
@@ -204,7 +235,15 @@ impl ResponseStoreBackend for SqliteStore {
             .unwrap_or_else(|| "default".into());
         let msgs_json = serde_json::to_string(&record.canonical_messages).unwrap_or_default();
         let req_json = serde_json::to_string(&record.request_json).unwrap_or_default();
+        let mapped_req_json =
+            serde_json::to_string(&record.mapped_request_json).unwrap_or_default();
         let resp_json = serde_json::to_string(&record.response_json).unwrap_or_default();
+        let upstream_error_json = record
+            .upstream_error
+            .as_ref()
+            .map(|value| serde_json::to_string(value).unwrap_or_default());
+        let debug_annotations_json =
+            serde_json::to_string(&record.debug_annotations).unwrap_or_default();
         let upstream_sse_json =
             serde_json::to_string(&record.upstream_sse_events).unwrap_or_default();
         let response_sse_json =
@@ -213,27 +252,44 @@ impl ResponseStoreBackend for SqliteStore {
 
         let conn = self.conn.lock().unwrap();
         let _ = conn.execute(
-            "INSERT OR REPLACE INTO responses (id, conversation_id, model, created_at, status, request_json, response_json, canonical_messages_json, upstream_sse_events_json, response_sse_events_json, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT OR REPLACE INTO responses (id, conversation_id, model, created_at, status, request_json, mapped_request_json, response_json, upstream_error_json, debug_annotations_json, canonical_messages_json, upstream_sse_events_json, response_sse_events_json, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             rusqlite::params![
-                record.id, conv_id, record.model, record.created_at,
-                record.status, req_json, resp_json, msgs_json, upstream_sse_json,
-                response_sse_json, expires_at
+                &record.id, &conv_id, &record.model, record.created_at,
+                &record.status, req_json, mapped_req_json, resp_json, upstream_error_json,
+                debug_annotations_json, msgs_json, upstream_sse_json, response_sse_json, expires_at
             ],
         );
+        let _ = conn.execute(
+            "DELETE FROM tool_reasoning WHERE conversation_id = ?1 AND response_id = ?2",
+            rusqlite::params![&conv_id, &record.id],
+        );
+        for (call_id, reasoning) in reasoning_map_from_messages(&record.canonical_messages) {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO tool_reasoning (conversation_id, response_id, tool_call_id, reasoning_content, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![&conv_id, &record.id, call_id, reasoning, now],
+            );
+        }
     }
 
     fn get(&self, id: &str) -> Option<StoredResponse> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
-            .prepare("SELECT id, conversation_id, model, created_at, status, request_json, response_json, canonical_messages_json, upstream_sse_events_json, response_sse_events_json FROM responses WHERE id = ?1")
+            .prepare("SELECT id, conversation_id, model, created_at, status, request_json, mapped_request_json, response_json, upstream_error_json, debug_annotations_json, canonical_messages_json, upstream_sse_events_json, response_sse_events_json FROM responses WHERE id = ?1")
             .ok()?;
         let row = stmt
             .query_row(rusqlite::params![id], |row| {
-                let msgs_json: String = row.get(7)?;
+                let msgs_json: String = row.get(10)?;
                 let msgs: Vec<ChatMessage> = serde_json::from_str(&msgs_json).unwrap_or_default();
-                let upstream_sse_json: String = row.get(8)?;
-                let response_sse_json: String = row.get(9)?;
+                let upstream_sse_json: String = row.get(11)?;
+                let response_sse_json: String = row.get(12)?;
+                let upstream_error_json: Option<String> = row.get(8)?;
+                let debug_annotations_json: String = row.get(9)?;
                 Ok(StoredResponse {
                     id: row.get(0)?,
                     conversation_id: row.get(1)?,
@@ -242,7 +298,12 @@ impl ResponseStoreBackend for SqliteStore {
                     status: row.get(4)?,
                     request_json: serde_json::from_str(&row.get::<_, String>(5)?)
                         .unwrap_or_default(),
-                    response_json: serde_json::from_str(&row.get::<_, String>(6)?)
+                    mapped_request_json: serde_json::from_str(&row.get::<_, String>(6)?)
+                        .unwrap_or_default(),
+                    response_json: serde_json::from_str(&row.get::<_, String>(7)?)
+                        .unwrap_or_default(),
+                    upstream_error: upstream_error_json.and_then(|s| serde_json::from_str(&s).ok()),
+                    debug_annotations: serde_json::from_str(&debug_annotations_json)
                         .unwrap_or_default(),
                     canonical_messages: msgs,
                     upstream_sse_events: serde_json::from_str(&upstream_sse_json)
@@ -339,16 +400,27 @@ impl ResponseStoreBackend for SqliteStore {
 
     fn build_reasoning_map(&self, conv_id: &str) -> HashMap<String, String> {
         let conn = self.conn.lock().unwrap();
+        let mut map = HashMap::new();
         let mut stmt = conn
             .prepare("SELECT tool_call_id, reasoning_content FROM tool_reasoning WHERE conversation_id = ?1")
             .ok();
-        let mut map = HashMap::new();
         if let Some(ref mut stmt) = stmt {
             if let Ok(rows) = stmt.query_map(rusqlite::params![conv_id], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             }) {
                 for row in rows.flatten() {
                     map.insert(row.0, row.1);
+                }
+            }
+        }
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT canonical_messages_json FROM responses WHERE conversation_id = ?1")
+            && let Ok(rows) =
+                stmt.query_map(rusqlite::params![conv_id], |row| row.get::<_, String>(0))
+        {
+            for msgs_json in rows.flatten() {
+                if let Ok(messages) = serde_json::from_str::<Vec<ChatMessage>>(&msgs_json) {
+                    map.extend(reasoning_map_from_messages(&messages));
                 }
             }
         }
@@ -426,7 +498,10 @@ mod tests {
             created_at: 1000,
             status: "completed".into(),
             request_json: serde_json::json!({"input": "hello"}),
+            mapped_request_json: serde_json::json!({"messages": []}),
             response_json: serde_json::json!({"output": "world"}),
+            upstream_error: None,
+            debug_annotations: vec![],
             canonical_messages: vec![],
             upstream_sse_events: vec![],
             response_sse_events: vec![],
@@ -454,7 +529,10 @@ mod tests {
             created_at: 1, // Unix epoch + 1 second
             status: "completed".into(),
             request_json: serde_json::json!({}),
+            mapped_request_json: serde_json::Value::Null,
             response_json: serde_json::json!({}),
+            upstream_error: None,
+            debug_annotations: vec![],
             canonical_messages: vec![],
             upstream_sse_events: vec![],
             response_sse_events: vec![],
@@ -491,7 +569,10 @@ mod tests {
             created_at: 1000,
             status: "completed".into(),
             request_json: serde_json::json!({}),
+            mapped_request_json: serde_json::Value::Null,
             response_json: serde_json::json!({}),
+            upstream_error: None,
+            debug_annotations: vec![],
             canonical_messages: vec![msg],
             upstream_sse_events: vec![],
             response_sse_events: vec![],
@@ -517,7 +598,10 @@ mod tests {
             created_at: 1,
             status: "ok".into(),
             request_json: serde_json::json!({}),
+            mapped_request_json: serde_json::Value::Null,
             response_json: serde_json::json!({}),
+            upstream_error: None,
+            debug_annotations: vec![],
             canonical_messages: vec![],
             upstream_sse_events: vec![],
             response_sse_events: vec![],
@@ -539,7 +623,10 @@ mod tests {
                 created_at,
                 status: "completed".into(),
                 request_json: serde_json::json!({}),
+                mapped_request_json: serde_json::Value::Null,
                 response_json: serde_json::json!({}),
+                upstream_error: None,
+                debug_annotations: vec![],
                 canonical_messages: vec![],
                 upstream_sse_events: vec![],
                 response_sse_events: vec![],
@@ -569,7 +656,10 @@ mod tests {
             created_at: 1,
             status: "completed".into(),
             request_json: serde_json::json!({"input": "hello"}),
+            mapped_request_json: serde_json::json!({"messages": []}),
             response_json: serde_json::json!({"id": "sqlite-sse-1"}),
+            upstream_error: None,
+            debug_annotations: vec!["note".into()],
             canonical_messages: vec![],
             upstream_sse_events: vec![serde_json::json!({"id": "chunk-1"})],
             response_sse_events: vec![serde_json::json!({"type": "response.completed"})],
@@ -586,9 +676,69 @@ mod tests {
             got.response_sse_events,
             vec![serde_json::json!({"type": "response.completed"})]
         );
+        assert_eq!(got.debug_annotations, vec!["note".to_string()]);
         let listed = store.list_recent(1);
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, "sqlite-sse-1");
+
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_store_builds_reasoning_map_from_canonical_messages() {
+        let path =
+            std::env::temp_dir().join(format!("codex-shim-reasoning-{}.db", uuid::Uuid::new_v4()));
+        let store = SqliteStore::new(&path, 3600).expect("sqlite store");
+        let msg = protocol::chat::ChatMessage::Assistant {
+            content: None,
+            name: None,
+            tool_calls: Some(vec![
+                protocol::chat::ChatToolCall {
+                    id: "call-a".into(),
+                    call_type: "function".into(),
+                    function: protocol::chat::ChatFunctionCall {
+                        name: Some("exec_command".into()),
+                        arguments: "{}".into(),
+                    },
+                },
+                protocol::chat::ChatToolCall {
+                    id: "call-b".into(),
+                    call_type: "function".into(),
+                    function: protocol::chat::ChatFunctionCall {
+                        name: Some("exec_command".into()),
+                        arguments: "{}".into(),
+                    },
+                },
+            ]),
+            reasoning_content: Some("real thinking".into()),
+        };
+
+        store.put(StoredResponse {
+            id: "sqlite-reasoning-1".into(),
+            model: "m".into(),
+            created_at: 1,
+            status: "completed".into(),
+            request_json: serde_json::json!({}),
+            mapped_request_json: serde_json::Value::Null,
+            response_json: serde_json::json!({}),
+            upstream_error: None,
+            debug_annotations: vec![],
+            canonical_messages: vec![msg],
+            upstream_sse_events: vec![],
+            response_sse_events: vec![],
+            conversation_id: None,
+        });
+
+        assert_eq!(
+            store.find_reasoning_by_call_id("default", "call-a"),
+            Some("real thinking".into())
+        );
+        assert_eq!(
+            store.find_reasoning_by_call_id("default", "call-b"),
+            Some("real thinking".into())
+        );
 
         drop(store);
         let _ = std::fs::remove_file(path);

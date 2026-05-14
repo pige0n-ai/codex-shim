@@ -148,7 +148,9 @@ pub fn build_responses_canonical_messages(
     if let Some(output) = response_body.get("output").and_then(|o| o.as_array()) {
         let mut pending_reasoning: Option<String> = None;
 
-        for item in output {
+        let mut i = 0;
+        while i < output.len() {
+            let item = &output[i];
             match item.get("type").and_then(|t| t.as_str()) {
                 Some("reasoning") => {
                     let text = item
@@ -165,6 +167,7 @@ pub fn build_responses_canonical_messages(
                     if !text.is_empty() {
                         pending_reasoning = Some(text);
                     }
+                    i += 1;
                 }
                 Some("message") => {
                     let role = item
@@ -197,29 +200,86 @@ pub fn build_responses_canonical_messages(
                             reasoning_content: pending_reasoning.take(),
                         });
                     }
+                    i += 1;
                 }
                 Some("function_call") => {
-                    let call_id = item.get("call_id").and_then(|c| c.as_str()).unwrap_or("");
-                    let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                    let arguments = item.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
-                    msgs.push(protocol::chat::ChatMessage::Assistant {
-                        content: None,
-                        name: None,
-                        tool_calls: Some(vec![protocol::chat::ChatToolCall {
+                    let mut tool_calls = Vec::new();
+                    while let Some(item) = output.get(i)
+                        && item.get("type").and_then(|t| t.as_str()) == Some("function_call")
+                    {
+                        let call_id = item.get("call_id").and_then(|c| c.as_str()).unwrap_or("");
+                        let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                        let arguments =
+                            item.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
+                        tool_calls.push(protocol::chat::ChatToolCall {
                             id: call_id.to_string(),
                             call_type: "function".to_string(),
                             function: protocol::chat::ChatFunctionCall {
                                 name: Some(name.to_string()),
                                 arguments: arguments.to_string(),
                             },
-                        }]),
+                        });
+                        i += 1;
+                    }
+                    msgs.push(protocol::chat::ChatMessage::Assistant {
+                        content: None,
+                        name: None,
+                        tool_calls: Some(tool_calls),
                         reasoning_content: pending_reasoning.take(),
                     });
                 }
-                _ => {}
+                _ => {
+                    i += 1;
+                }
             }
         }
     }
 
     msgs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn responses_canonical_messages_group_parallel_function_calls() {
+        let response_body = serde_json::json!({
+            "output": [
+                {
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "thinking"}]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_a",
+                    "name": "exec_command",
+                    "arguments": "{\"cmd\":\"a\"}"
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_b",
+                    "name": "exec_command",
+                    "arguments": "{\"cmd\":\"b\"}"
+                }
+            ]
+        });
+
+        let msgs = build_responses_canonical_messages(&[], &response_body);
+
+        assert_eq!(msgs.len(), 1);
+        match &msgs[0] {
+            ChatMessage::Assistant {
+                tool_calls: Some(tool_calls),
+                reasoning_content,
+                ..
+            } => {
+                assert_eq!(reasoning_content.as_deref(), Some("thinking"));
+                assert_eq!(tool_calls.len(), 2);
+                assert_eq!(tool_calls[0].id, "call_a");
+                assert_eq!(tool_calls[1].id, "call_b");
+            }
+            other => panic!("expected grouped assistant tool calls, got {other:?}"),
+        }
+    }
 }

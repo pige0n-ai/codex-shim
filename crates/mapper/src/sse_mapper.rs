@@ -17,6 +17,7 @@ pub struct StreamState {
     pub output_index: u32,
     content_index: u32,
     lifecycle_sent: bool,
+    text_item_started: bool,
     completed_sent: bool, // guard against duplicate completion events
     pub accumulated_text: String,
     pub tool_call_id: Option<String>,
@@ -66,6 +67,7 @@ impl StreamState {
             output_index: 0,
             content_index: 0,
             lifecycle_sent: false,
+            text_item_started: false,
             completed_sent: false,
             accumulated_text: String::new(),
             tool_call_id: None,
@@ -126,6 +128,31 @@ impl StreamState {
         normalized
     }
 
+    fn ensure_text_item_started(&mut self, events: &mut Vec<ResponseSseEvent>) {
+        if self.text_item_started {
+            return;
+        }
+        events.push(ResponseSseEvent::ResponseOutputItemAdded {
+            output_index: self.output_index,
+            item: ResponseOutputItem::Message {
+                id: self.output_item_id.clone(),
+                status: "in_progress".into(),
+                role: "assistant".into(),
+                content: vec![],
+            },
+        });
+        events.push(ResponseSseEvent::ResponseContentPartAdded {
+            item_id: self.output_item_id.clone(),
+            output_index: self.output_index,
+            content_index: self.content_index,
+            part: ContentPart::OutputText {
+                text: String::new(),
+                annotations: vec![],
+            },
+        });
+        self.text_item_started = true;
+    }
+
     /// Process a single Chat SSE chunk. Returns zero or more Response SSE events.
     pub fn process_chunk(
         &mut self,
@@ -141,25 +168,6 @@ impl StreamState {
                     self.model.clone(),
                     self.created_at,
                 ),
-            });
-            // Pre-announce the output item (we'll fill in details at done)
-            events.push(ResponseSseEvent::ResponseOutputItemAdded {
-                output_index: self.output_index,
-                item: ResponseOutputItem::Message {
-                    id: self.output_item_id.clone(),
-                    status: "in_progress".into(),
-                    role: "assistant".into(),
-                    content: vec![],
-                },
-            });
-            events.push(ResponseSseEvent::ResponseContentPartAdded {
-                item_id: self.output_item_id.clone(),
-                output_index: self.output_index,
-                content_index: self.content_index,
-                part: ContentPart::OutputText {
-                    text: String::new(),
-                    annotations: vec![],
-                },
             });
             self.lifecycle_sent = true;
         }
@@ -194,6 +202,7 @@ impl StreamState {
         if let Some(text) = &delta.content
             && !text.is_empty()
         {
+            self.ensure_text_item_started(&mut events);
             self.accumulated_text.push_str(text);
             events.push(ResponseSseEvent::ResponseOutputTextDelta {
                 item_id: self.output_item_id.clone(),
@@ -214,7 +223,7 @@ impl StreamState {
                     Some(pos) => (pos, false),
                     None => {
                         let is_first = self.tool_calls.is_empty();
-                        let item_id = if is_first {
+                        let item_id = if is_first && !self.text_item_started {
                             self.output_item_id.clone()
                         } else {
                             format!("fc_{}", Uuid::new_v4())
@@ -228,7 +237,7 @@ impl StreamState {
                             arguments: String::new(),
                         });
                         let pos = self.tool_calls.len() - 1;
-                        (pos, !is_first)
+                        (pos, true)
                     }
                 };
 
@@ -240,12 +249,14 @@ impl StreamState {
                     if let Some(name) = &func.name {
                         self.tool_calls[pos].name = Some(name.clone());
                     }
-                    if emit_added {
-                        events.push(ResponseSseEvent::ResponseOutputItemAdded {
-                            output_index: tc.index,
-                            item: self.tool_calls[pos].output_item("in_progress"),
-                        });
-                    }
+                }
+                if emit_added {
+                    events.push(ResponseSseEvent::ResponseOutputItemAdded {
+                        output_index: tc.index,
+                        item: self.tool_calls[pos].output_item("in_progress"),
+                    });
+                }
+                if let Some(func) = &tc.function {
                     if let Some(args) = &func.arguments {
                         self.tool_calls[pos].arguments.push_str(args);
                         events.push(ResponseSseEvent::ResponseFunctionCallArgumentsDelta {
@@ -283,7 +294,7 @@ impl StreamState {
         events
     }
 
-    fn emit_completion_events(&self, events: &mut Vec<ResponseSseEvent>) {
+    fn emit_completion_events(&mut self, events: &mut Vec<ResponseSseEvent>) {
         let tool_calls = self.normalized_tool_calls();
 
         if self.tool_call_active {
@@ -311,6 +322,7 @@ impl StreamState {
         }
 
         if !self.accumulated_text.is_empty() || !self.tool_call_active {
+            self.ensure_text_item_started(events);
             // Finish text output
             events.push(ResponseSseEvent::ResponseOutputTextDone {
                 item_id: self.output_item_id.clone(),
@@ -493,6 +505,24 @@ mod tests {
         }
     }
 
+    fn reasoning_chunk(text: &str) -> ChatCompletionChunk {
+        ChatCompletionChunk {
+            id: "chatcmpl_test".into(),
+            object: "chat.completion.chunk".into(),
+            created: 1,
+            model: "test-model".into(),
+            choices: Some(vec![ChatChunkChoice {
+                index: 0,
+                delta: ChatDelta {
+                    reasoning_content: Some(text.into()),
+                    ..ChatDelta::default()
+                },
+                finish_reason: None,
+            }]),
+            usage: None,
+        }
+    }
+
     #[test]
     fn complete_keeps_usage_from_final_empty_chunk() {
         let mut state =
@@ -561,6 +591,79 @@ mod tests {
         let events = state.complete();
         let usage = completed_usage(&events);
         assert_eq!(usage.total_tokens, 13);
+    }
+
+    #[test]
+    fn tool_only_stream_does_not_create_empty_message_item() {
+        let mut state =
+            StreamState::new("resp_test".into(), "test-model".into(), 1, "out_1".into());
+
+        let events = state
+            .process_chunk(&tool_chunk(
+                vec![ChatToolCallDelta {
+                    index: 0,
+                    id: Some("call_1".into()),
+                    function: Some(ChatFunctionDelta {
+                        name: Some("exec_command".into()),
+                        arguments: Some(r#"{"cmd":"ls"}"#.into()),
+                    }),
+                }],
+                Some("tool_calls"),
+            ))
+            .expect("tool chunk");
+
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            ResponseSseEvent::ResponseOutputItemAdded {
+                item: ResponseOutputItem::Message { .. },
+                ..
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ResponseSseEvent::ResponseOutputItemAdded {
+                item: ResponseOutputItem::FunctionCall { call_id, .. },
+                ..
+            } if call_id == "call_1"
+        )));
+    }
+
+    #[test]
+    fn reasoning_before_tool_does_not_create_empty_message_item() {
+        let mut state =
+            StreamState::new("resp_test".into(), "test-model".into(), 1, "out_1".into());
+
+        let reasoning_events = state
+            .process_chunk(&reasoning_chunk("thinking"))
+            .expect("reasoning chunk");
+
+        assert!(
+            reasoning_events
+                .iter()
+                .all(|event| !matches!(event, ResponseSseEvent::ResponseOutputItemAdded { .. }))
+        );
+
+        let tool_events = state
+            .process_chunk(&tool_chunk(
+                vec![ChatToolCallDelta {
+                    index: 0,
+                    id: Some("call_1".into()),
+                    function: Some(ChatFunctionDelta {
+                        name: Some("exec_command".into()),
+                        arguments: Some(r#"{"cmd":"ls"}"#.into()),
+                    }),
+                }],
+                Some("tool_calls"),
+            ))
+            .expect("tool chunk");
+
+        assert!(tool_events.iter().any(|event| matches!(
+            event,
+            ResponseSseEvent::ResponseOutputItemAdded {
+                item: ResponseOutputItem::FunctionCall { call_id, .. },
+                ..
+            } if call_id == "call_1"
+        )));
     }
 
     #[test]

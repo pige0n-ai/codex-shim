@@ -243,7 +243,12 @@ async fn handle_non_stream(
         created_at: response_object.created_at,
         status: response_object.status.clone(),
         request_json: serde_json::to_value(&req).unwrap_or_default(),
+        mapped_request_json: serde_json::to_value(&chat_req).unwrap_or_default(),
         response_json: serde_json::to_value(&response_object).unwrap_or_default(),
+        upstream_error: None,
+        debug_annotations: debug_annotations_for_request(
+            &serde_json::to_value(&req).unwrap_or_default(),
+        ),
         canonical_messages,
         upstream_sse_events: vec![],
         response_sse_events: vec![],
@@ -293,6 +298,29 @@ async fn handle_stream(
     if status >= 400 {
         let body = upstream_resp.text().await.unwrap_or_default();
         tracing::warn!(%status, %body, "Upstream error response");
+        let upstream_error = serde_json::from_str::<serde_json::Value>(&body)
+            .unwrap_or_else(|_| serde_json::json!({ "body": body.clone() }));
+        state.store.put(StoredResponse {
+            conversation_id: None,
+            id: mapped.response_id.clone(),
+            model: resolved_model,
+            created_at: chrono::Utc::now().timestamp(),
+            status: "failed".into(),
+            request_json: serde_json::to_value(&_req).unwrap_or_default(),
+            mapped_request_json: serde_json::to_value(&chat_req).unwrap_or_default(),
+            response_json: serde_json::Value::Null,
+            upstream_error: Some(serde_json::json!({
+                "status": status,
+                "body": upstream_error,
+            })),
+            debug_annotations: debug_annotations_for_request(
+                &serde_json::to_value(&_req).unwrap_or_default(),
+            ),
+            canonical_messages: chat_req.messages.clone(),
+            upstream_sse_events: vec![],
+            response_sse_events: vec![],
+        });
+        state.metrics.set_store_size(state.store.len());
         return Err(record_error(mapper::error_mapper::map_upstream_error(
             status, &body,
         )));
@@ -337,6 +365,7 @@ async fn handle_stream(
         let mut response_sse_events: Vec<serde_json::Value> = Vec::new();
         let mut chunk_count: u64 = 0;
         let mut text_bytes: u64 = 0;
+        let mut final_events: Option<Vec<ResponseSseEvent>> = None;
 
         tracing::info!("Starting to read upstream SSE stream");
 
@@ -347,15 +376,16 @@ async fn handle_stream(
 
                     if data == "[DONE]" {
                         upstream_sse_events.push(serde_json::json!({"data": "[DONE]"}));
-                        for event in stream_state.complete() {
+                        let events = stream_state.complete();
+                        for event in &events {
                             // Capture the completed response JSON for store
-                            if let ResponseSseEvent::ResponseCompleted { ref response } = event {
+                            if let ResponseSseEvent::ResponseCompleted { response } = event {
                                 response_body = serde_json::to_value(response).unwrap_or_default();
                             }
                             response_sse_events
-                                .push(serde_json::to_value(&event).unwrap_or_default());
-                            let _ = tx.send(Ok(event)).await;
+                                .push(serde_json::to_value(event).unwrap_or_default());
                         }
+                        final_events = Some(events);
                         break;
                     }
 
@@ -450,21 +480,34 @@ async fn handle_stream(
             });
         }
 
+        let debug_annotations = debug_annotations_for_request(&req_json);
+
         // Save to store for previous_response_id support
         store.put(StoredResponse {
             conversation_id: None,
-            id: response_id,
+            id: response_id.clone(),
             model,
             created_at,
             status: "completed".into(),
             request_json: req_json,
+            mapped_request_json: serde_json::to_value(&chat_req).unwrap_or_default(),
             response_json: response_body,
+            upstream_error: None,
+            debug_annotations,
             canonical_messages: canonical,
             upstream_sse_events,
             response_sse_events,
         });
         metrics.set_store_size(store.len());
         metrics.record_request_completed(stream_state.final_usage());
+
+        if let Some(events) = final_events {
+            for event in events {
+                if tx.send(Ok(event)).await.is_err() {
+                    return;
+                }
+            }
+        }
     });
 
     let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -543,6 +586,47 @@ fn build_reasoning_map(
     store.build_reasoning_map("default")
 }
 
+fn debug_annotations_for_request(request: &serde_json::Value) -> Vec<String> {
+    let mut annotations = Vec::new();
+    let input_items = request
+        .get("input")
+        .and_then(|input| input.as_array())
+        .or_else(|| request.get("items").and_then(|items| items.as_array()));
+    let Some(items) = input_items else {
+        return annotations;
+    };
+
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (idx, item) in items.iter().enumerate() {
+        let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if item_type != "message" {
+            continue;
+        }
+        let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        if !matches!(role, "developer" | "system" | "user") {
+            continue;
+        }
+        let key = serde_json::json!({
+            "type": item_type,
+            "role": role,
+            "content": item.get("content").cloned().unwrap_or_default(),
+        })
+        .to_string();
+        if let Some(first_idx) = seen.get(&key) {
+            annotations.push(format!(
+                "duplicate input message detected at indexes {first_idx} and {idx}; request was not modified"
+            ));
+            if annotations.len() >= 10 {
+                annotations.push("duplicate input message scan stopped after 10 findings".into());
+                break;
+            }
+        } else {
+            seen.insert(key, idx);
+        }
+    }
+    annotations
+}
+
 // ── Native Responses proxy ───────────────────────────────────────
 
 async fn handle_native_responses(
@@ -591,6 +675,29 @@ async fn handle_native_responses(
     let status = upstream_resp.status().as_u16();
     if status >= 400 {
         let err_body = upstream_resp.text().await.unwrap_or_default();
+        let upstream_error = serde_json::from_str::<serde_json::Value>(&err_body)
+            .unwrap_or_else(|_| serde_json::json!({ "body": err_body.clone() }));
+        state.store.put(StoredResponse {
+            conversation_id: None,
+            id: format!("resp_{}", uuid::Uuid::new_v4()),
+            model: resolved_model,
+            created_at: chrono::Utc::now().timestamp(),
+            status: "failed".into(),
+            request_json: serde_json::to_value(&canonical).unwrap_or_default(),
+            mapped_request_json: body.clone(),
+            response_json: serde_json::Value::Null,
+            upstream_error: Some(serde_json::json!({
+                "status": status,
+                "body": upstream_error,
+            })),
+            debug_annotations: debug_annotations_for_request(
+                &serde_json::to_value(&canonical).unwrap_or_default(),
+            ),
+            canonical_messages: canonical.clone().into_canonical_messages(),
+            upstream_sse_events: vec![],
+            response_sse_events: vec![],
+        });
+        state.metrics.set_store_size(state.store.len());
         return Err(record_error(mapper::error_mapper::map_upstream_error(
             status, &err_body,
         )));
@@ -619,6 +726,7 @@ async fn handle_native_responses(
             let mut upstream_sse_events: Vec<serde_json::Value> = Vec::new();
             let mut response_sse_events: Vec<serde_json::Value> = Vec::new();
             let mut saw_completed = false;
+            let mut completed_event: Option<protocol::sse::ResponseSseEvent> = None;
             while let Some(Ok(event)) = sse_stream.next().await {
                 upstream_sse_events.push(
                     serde_json::from_str::<serde_json::Value>(&event.data)
@@ -633,7 +741,14 @@ async fn handle_native_responses(
                         serde_json::from_value::<protocol::sse::ResponseSseEvent>(parsed.clone())
                     {
                         response_sse_events.push(parsed);
-                        let _ = tx.send(Ok(sse_event)).await;
+                        if matches!(
+                            sse_event,
+                            protocol::sse::ResponseSseEvent::ResponseCompleted { .. }
+                        ) {
+                            completed_event = Some(sse_event);
+                        } else {
+                            let _ = tx.send(Ok(sse_event)).await;
+                        }
                     }
                 }
             }
@@ -659,6 +774,7 @@ async fn handle_native_responses(
                     &response_body,
                 )
             };
+            let debug_annotations = debug_annotations_for_request(&req_json);
 
             store.put(StoredResponse {
                 conversation_id: None,
@@ -674,7 +790,10 @@ async fn handle_native_responses(
                     .unwrap_or("completed")
                     .into(),
                 request_json: req_json,
+                mapped_request_json: serde_json::to_value(&body).unwrap_or_default(),
                 response_json: response_body.clone(),
+                upstream_error: None,
+                debug_annotations,
                 canonical_messages: canonical_msgs_for_store,
                 upstream_sse_events,
                 response_sse_events,
@@ -685,6 +804,10 @@ async fn handle_native_responses(
             )
             .ok();
             metrics.record_request_completed(usage.as_ref());
+
+            if let Some(event) = completed_event {
+                let _ = tx.send(Ok(event)).await;
+            }
         });
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -721,7 +844,12 @@ async fn handle_native_responses(
                 .unwrap_or("completed")
                 .into(),
             request_json: serde_json::to_value(&canonical).unwrap_or_default(),
+            mapped_request_json: body.clone(),
             response_json: response_body.clone(),
+            upstream_error: None,
+            debug_annotations: debug_annotations_for_request(
+                &serde_json::to_value(&canonical).unwrap_or_default(),
+            ),
             canonical_messages: canonical_msgs,
             upstream_sse_events: vec![],
             response_sse_events: vec![],
@@ -1088,5 +1216,27 @@ fn validate_content_part(part: &Value, path: &str) -> Result<(), ApiError> {
         "input_text" | "input_image" | "output_text" => Ok(()),
         "refusal" => Err(ApiError::unsupported_content_part("refusal")),
         other => Err(ApiError::unsupported_content_part(other)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_annotations_mark_duplicate_input_messages_without_rewriting() {
+        let request = serde_json::json!({
+            "input": [
+                {"type": "message", "role": "developer", "content": "same"},
+                {"type": "message", "role": "user", "content": "different"},
+                {"type": "message", "role": "developer", "content": "same"}
+            ]
+        });
+
+        let annotations = debug_annotations_for_request(&request);
+
+        assert_eq!(annotations.len(), 1);
+        assert!(annotations[0].contains("indexes 0 and 2"));
+        assert_eq!(request["input"].as_array().unwrap().len(), 3);
     }
 }
