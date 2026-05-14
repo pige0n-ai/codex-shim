@@ -1,10 +1,15 @@
-use axum::{Json, extract::State, response::IntoResponse};
+use axum::{
+    Json,
+    extract::{Query, State},
+    response::IntoResponse,
+};
 use futures::StreamExt;
 use mapper::MappingConfig;
 use protocol::canonical::CanonicalRequest;
 use protocol::error::ApiError;
 use protocol::responses::ResponsesCreateRequest;
 use protocol::sse::ResponseSseEvent;
+use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use crate::AppState;
@@ -485,6 +490,19 @@ pub async fn get_response_debug(
         Some(record) => Ok(Json(record)),
         None => Err(to_status_json(&ApiError::response_not_found(&id))),
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DebugResponsesQuery {
+    limit: Option<usize>,
+}
+
+pub async fn list_responses_debug(
+    State(state): State<AppState>,
+    Query(query): Query<DebugResponsesQuery>,
+) -> Json<Vec<StoredResponse>> {
+    let limit = query.limit.unwrap_or(20).clamp(1, 200);
+    Json(state.store.list_recent(limit))
 }
 
 pub async fn delete_response(

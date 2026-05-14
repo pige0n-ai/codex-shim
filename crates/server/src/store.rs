@@ -35,6 +35,7 @@ pub struct StoredResponse {
 pub trait ResponseStoreBackend: Send + Sync {
     fn put(&self, record: StoredResponse);
     fn get(&self, id: &str) -> Option<StoredResponse>;
+    fn list_recent(&self, limit: usize) -> Vec<StoredResponse>;
     fn delete(&self, id: &str) -> bool;
     fn clear(&self);
     fn cleanup_expired(&self) -> usize;
@@ -70,6 +71,18 @@ impl ResponseStoreBackend for MemoryStore {
 
     fn get(&self, id: &str) -> Option<StoredResponse> {
         self.inner.read().unwrap().get(id).cloned()
+    }
+
+    fn list_recent(&self, limit: usize) -> Vec<StoredResponse> {
+        let mut records: Vec<StoredResponse> =
+            self.inner.read().unwrap().values().cloned().collect();
+        records.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+        records.truncate(limit);
+        records
     }
 
     fn delete(&self, id: &str) -> bool {
@@ -242,6 +255,25 @@ impl ResponseStoreBackend for SqliteStore {
         Some(row)
     }
 
+    fn list_recent(&self, limit: usize) -> Vec<StoredResponse> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn
+            .prepare("SELECT id FROM responses ORDER BY created_at DESC, id DESC LIMIT ?1")
+        {
+            Ok(stmt) => stmt,
+            Err(_) => return Vec::new(),
+        };
+        let ids = match stmt.query_map(rusqlite::params![limit as i64], |row| {
+            row.get::<_, String>(0)
+        }) {
+            Ok(rows) => rows.filter_map(Result::ok).collect::<Vec<_>>(),
+            Err(_) => return Vec::new(),
+        };
+        drop(stmt);
+        drop(conn);
+        ids.into_iter().filter_map(|id| self.get(&id)).collect()
+    }
+
     fn delete(&self, id: &str) -> bool {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM responses WHERE id = ?1", rusqlite::params![id])
@@ -345,6 +377,10 @@ impl ResponseStore {
 
     pub fn get(&self, id: &str) -> Option<StoredResponse> {
         self.backend.get(id)
+    }
+
+    pub fn list_recent(&self, limit: usize) -> Vec<StoredResponse> {
+        self.backend.list_recent(limit)
     }
 
     pub fn delete(&self, id: &str) -> bool {
@@ -493,6 +529,33 @@ mod tests {
         assert_eq!(got.id, "rs-1");
     }
 
+    #[test]
+    fn memory_store_lists_recent_records() {
+        let store = MemoryStore::new(3600);
+        for (id, created_at) in [("old", 1), ("new", 3), ("mid", 2)] {
+            store.put(StoredResponse {
+                id: id.into(),
+                model: "m".into(),
+                created_at,
+                status: "completed".into(),
+                request_json: serde_json::json!({}),
+                response_json: serde_json::json!({}),
+                canonical_messages: vec![],
+                upstream_sse_events: vec![],
+                response_sse_events: vec![],
+                conversation_id: None,
+            });
+        }
+
+        let ids = store
+            .list_recent(2)
+            .into_iter()
+            .map(|record| record.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["new", "mid"]);
+    }
+
     #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_store_round_trips_sse_events() {
@@ -523,6 +586,9 @@ mod tests {
             got.response_sse_events,
             vec![serde_json::json!({"type": "response.completed"})]
         );
+        let listed = store.list_recent(1);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "sqlite-sse-1");
 
         drop(store);
         let _ = std::fs::remove_file(path);

@@ -1042,6 +1042,76 @@ pub fn enforce_tool_call_adjacency(messages: &mut Vec<ChatMessage>) {
         // Advance past the assistant + all tool results
         i += 1 + found;
     }
+
+    split_completed_parallel_tool_call_messages(messages);
+}
+
+fn split_completed_parallel_tool_call_messages(messages: &mut Vec<ChatMessage>) {
+    let mut i = 0;
+    while i < messages.len() {
+        let (content, name, reasoning_content, tool_calls) = match &messages[i] {
+            ChatMessage::Assistant {
+                content,
+                name,
+                tool_calls: Some(tool_calls),
+                reasoning_content,
+            } if tool_calls.len() > 1 => (
+                content.clone(),
+                name.clone(),
+                reasoning_content.clone(),
+                tool_calls.clone(),
+            ),
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+
+        if i + tool_calls.len() >= messages.len() {
+            i += 1;
+            continue;
+        }
+
+        let tool_segment = &messages[i + 1..i + 1 + tool_calls.len()];
+        let mut tool_results = Vec::with_capacity(tool_calls.len());
+        let mut all_results_present = true;
+        for tool_call in &tool_calls {
+            let Some(tool_result) = tool_segment.iter().find(|msg| {
+                matches!(
+                    msg,
+                    ChatMessage::Tool { tool_call_id, .. } if tool_call_id == &tool_call.id
+                )
+            }) else {
+                all_results_present = false;
+                break;
+            };
+            tool_results.push(tool_result.clone());
+        }
+
+        if !all_results_present {
+            i += 1;
+            continue;
+        }
+
+        let mut replacement = Vec::with_capacity(tool_calls.len() * 2);
+        let replace_end = i + 1 + tool_results.len();
+        for (idx, tool_call) in tool_calls.into_iter().enumerate() {
+            replacement.push(ChatMessage::Assistant {
+                content: if idx == 0 { content.clone() } else { None },
+                name: if idx == 0 { name.clone() } else { None },
+                tool_calls: Some(vec![tool_call]),
+                reasoning_content: if idx == 0 {
+                    reasoning_content.clone()
+                } else {
+                    None
+                },
+            });
+            replacement.push(tool_results[idx].clone());
+        }
+
+        messages.splice(i..replace_end, replacement);
+        i += 1;
+    }
 }
 
 fn canonical_message_to_chat(
@@ -1121,17 +1191,26 @@ mod adjacency_tests {
     use crate::chat::{ChatContent, ChatFunctionCall, ChatMessage, ChatToolCall};
 
     fn assistant_tool_call(id: &str, name: &str, args: &str) -> ChatMessage {
+        assistant_tool_calls(vec![(id, name, args)])
+    }
+
+    fn assistant_tool_calls(calls: Vec<(&str, &str, &str)>) -> ChatMessage {
         ChatMessage::Assistant {
             content: None,
             name: None,
-            tool_calls: Some(vec![ChatToolCall {
-                id: id.to_string(),
-                call_type: "function".into(),
-                function: ChatFunctionCall {
-                    name: Some(name.to_string()),
-                    arguments: args.to_string(),
-                },
-            }]),
+            tool_calls: Some(
+                calls
+                    .into_iter()
+                    .map(|(id, name, args)| ChatToolCall {
+                        id: id.to_string(),
+                        call_type: "function".into(),
+                        function: ChatFunctionCall {
+                            name: Some(name.to_string()),
+                            arguments: args.to_string(),
+                        },
+                    })
+                    .collect(),
+            ),
             reasoning_content: None,
         }
     }
@@ -1188,6 +1267,71 @@ mod adjacency_tests {
         ];
         let expected = msgs.clone();
         enforce_tool_call_adjacency(&mut msgs);
+        assert_eq!(msgs, expected);
+    }
+
+    #[test]
+    fn splits_completed_parallel_tool_calls_into_single_call_pairs() {
+        let mut msgs = vec![
+            user_msg("hello"),
+            assistant_tool_calls(vec![
+                ("call_1", "exec_command", r#"{"cmd":"one"}"#),
+                ("call_2", "exec_command", r#"{"cmd":"two"}"#),
+            ]),
+            tool_result("call_2", "two"),
+            tool_result("call_1", "one"),
+            user_msg("next"),
+        ];
+
+        enforce_tool_call_adjacency(&mut msgs);
+
+        assert_eq!(msgs.len(), 6);
+        assert!(matches!(&msgs[0], ChatMessage::User { .. }));
+        match &msgs[1] {
+            ChatMessage::Assistant {
+                tool_calls: Some(calls),
+                ..
+            } => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].id, "call_1");
+            }
+            other => panic!("expected first assistant tool call, got {other:?}"),
+        }
+        assert!(matches!(
+            &msgs[2],
+            ChatMessage::Tool { tool_call_id, .. } if tool_call_id == "call_1"
+        ));
+        match &msgs[3] {
+            ChatMessage::Assistant {
+                tool_calls: Some(calls),
+                ..
+            } => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].id, "call_2");
+            }
+            other => panic!("expected second assistant tool call, got {other:?}"),
+        }
+        assert!(matches!(
+            &msgs[4],
+            ChatMessage::Tool { tool_call_id, .. } if tool_call_id == "call_2"
+        ));
+        assert!(matches!(&msgs[5], ChatMessage::User { .. }));
+    }
+
+    #[test]
+    fn leaves_incomplete_parallel_tool_calls_grouped() {
+        let mut msgs = vec![
+            user_msg("hello"),
+            assistant_tool_calls(vec![
+                ("call_1", "exec_command", r#"{"cmd":"one"}"#),
+                ("call_2", "exec_command", r#"{"cmd":"two"}"#),
+            ]),
+            tool_result("call_1", "one"),
+        ];
+        let expected = msgs.clone();
+
+        enforce_tool_call_adjacency(&mut msgs);
+
         assert_eq!(msgs, expected);
     }
 

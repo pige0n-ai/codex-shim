@@ -118,6 +118,8 @@ pub fn app_with_metrics(config: Config, metrics: Arc<RuntimeMetrics>) -> anyhow:
         .route("/models", get(routes::models))
         .route("/v1/responses", post(routes::create_response))
         .route("/responses", post(routes::create_response))
+        .route("/v1/debug/responses", get(routes::list_responses_debug))
+        .route("/debug/responses", get(routes::list_responses_debug))
         .route(
             "/v1/responses/compact",
             post(routes::compact_not_implemented),
