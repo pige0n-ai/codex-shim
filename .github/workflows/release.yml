@@ -98,6 +98,8 @@ jobs:
             libxdo-dev
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
 
       - name: Build CLI
         if: matrix.cli_bin != '' && needs.detect.outputs.build-gui == 'false'

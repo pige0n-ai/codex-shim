@@ -139,11 +139,18 @@ reasoning:
 They can differ: a model can be advertised as reasoning-capable while the shim
 defaults to disabled.
 
+When `models.catalog[*].base_instructions` is omitted, the generated Codex
+model catalog now includes a small Codex coding-agent default so custom upstream
+models receive a self-definition and basic tool-use guidance. Set
+`base_instructions: ""` explicitly only when you intentionally want Codex to
+send empty base instructions for that model.
+
 ## Other Blocks
 
 ```yaml
 state:
-  backend: sqlite             # default
+  backend: memory             # memory/ram, or sqlite when the binary has sqlite support
+  sqlite_path: ~/.codex-shim/store.db  # optional; used only with backend: sqlite
 
 logging:
   level: info                 # debug, info, warn, error

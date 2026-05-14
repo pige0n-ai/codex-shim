@@ -206,44 +206,10 @@ impl CanonicalRequest {
             );
         }
 
-        // 3. Map canonical items → chat messages
-        let mut pending_reasoning: Option<String> = None;
-        for item in &self.items {
-            match item {
-                CanonicalItem::Message(msg) => {
-                    let chat_msg = canonical_message_to_chat(msg, &mut pending_reasoning);
-                    messages.push(chat_msg);
-                }
-                CanonicalItem::FunctionCall(call) => {
-                    messages.push(ChatMessage::Assistant {
-                        content: None,
-                        name: None,
-                        tool_calls: Some(vec![ChatToolCall {
-                            id: call.call_id.clone(),
-                            call_type: "function".into(),
-                            function: ChatFunctionCall {
-                                name: Some(call.name.clone()),
-                                arguments: call.arguments.clone(),
-                            },
-                        }]),
-                        reasoning_content: pending_reasoning.take(),
-                    });
-                }
-                CanonicalItem::FunctionCallOutput(output) => {
-                    messages.push(ChatMessage::Tool {
-                        content: ChatContent::Text(output.output.clone()),
-                        tool_call_id: output.call_id.clone(),
-                    });
-                }
-                CanonicalItem::Reasoning(reasoning) => {
-                    let existing = pending_reasoning.get_or_insert_with(String::new);
-                    if !existing.is_empty() {
-                        existing.push('\n');
-                    }
-                    existing.push_str(&reasoning.text);
-                }
-            }
-        }
+        // 3. Map canonical items → chat messages. Responses represents tool
+        // calls as flat sibling items; Chat Completions represents parallel
+        // calls as one assistant message with multiple tool_calls.
+        push_canonical_items_as_chat(&mut messages, &self.items);
         // 4. Enforce tool call adjacency required by OpenAI/DeepSeek API
         enforce_tool_call_adjacency(&mut messages);
 
@@ -715,11 +681,20 @@ fn map_input_item(item: &InputItem) -> Result<CanonicalItem, String> {
             arguments: serde_json::to_string(input).unwrap_or_default(),
         })),
         InputItem::LocalShellCall {
-            call_id, command, ..
+            call_id,
+            command,
+            cwd,
+            timeout_ms,
+            ..
         } => Ok(CanonicalItem::FunctionCall(CanonicalFunctionCall {
             call_id: call_id.clone(),
             name: "__codex_local_shell".into(),
-            arguments: command.clone(),
+            arguments: serde_json::to_string(&serde_json::json!({
+                "command": command,
+                "cwd": cwd,
+                "timeout_ms": timeout_ms,
+            }))
+            .unwrap_or_default(),
         })),
         InputItem::ApplyPatchCall {
             call_id,
@@ -975,6 +950,8 @@ fn role_str(role: &CanonicalMessageRole) -> &'static str {
 /// and its tool results are moved to before the assistant message, preserving
 /// relative order.
 pub fn enforce_tool_call_adjacency(messages: &mut Vec<ChatMessage>) {
+    group_consecutive_assistant_tool_call_messages(messages);
+
     let mut i = 0;
     while i < messages.len() {
         // Collect tool_call_ids from an assistant message
@@ -994,45 +971,283 @@ pub fn enforce_tool_call_adjacency(messages: &mut Vec<ChatMessage>) {
             continue;
         }
 
-        // Scan forward to find tool results for these calls.
-        // Track any non-Tool messages that intervene.
+        // Scan forward to find tool results for these calls. Track non-tool
+        // messages that intervene so approval/status messages can move before
+        // the assistant without breaking Chat's adjacency rule.
         let mut j = i + 1;
-        let mut found: usize = 0;
+        let mut found_indices: Vec<usize> = Vec::new();
         let mut intervening_indices: Vec<usize> = Vec::new();
+        let mut saw_intervening_tool = false;
 
-        while j < messages.len() && found < call_ids.len() {
-            let is_tool_match = match &messages[j] {
-                ChatMessage::Tool { tool_call_id, .. } => {
-                    call_ids.iter().any(|id| id == tool_call_id)
+        while j < messages.len() && found_indices.len() < call_ids.len() {
+            match &messages[j] {
+                ChatMessage::Tool { tool_call_id, .. }
+                    if call_ids.iter().any(|id| id == tool_call_id)
+                        && !found_indices.iter().any(|idx| {
+                            matches!(
+                                &messages[*idx],
+                                ChatMessage::Tool { tool_call_id: existing, .. } if existing == tool_call_id
+                            )
+                        }) =>
+                {
+                    found_indices.push(j);
                 }
-                _ => false,
-            };
-            if is_tool_match {
-                found += 1;
-            } else {
-                intervening_indices.push(j);
+                ChatMessage::Tool { .. } => {
+                    saw_intervening_tool = true;
+                    intervening_indices.push(j);
+                }
+                _ => intervening_indices.push(j),
             }
             j += 1;
         }
 
-        if !intervening_indices.is_empty() {
-            // Extract all intervening messages and insert them
-            // before the assistant message at position i.
-            // Remove in reverse order to preserve indices.
-            let mut moved: Vec<ChatMessage> = Vec::new();
-            for &idx in intervening_indices.iter().rev() {
-                moved.push(messages.remove(idx));
-            }
-            // Insert in original order before the assistant message
-            for msg in moved.into_iter().rev() {
-                messages.insert(i, msg);
-                i += 1;
+        if found_indices.len() != call_ids.len() || saw_intervening_tool {
+            i += 1;
+            continue;
+        }
+
+        if intervening_indices.is_empty() {
+            reorder_adjacent_tool_results(messages, i, &call_ids);
+            i += 1 + call_ids.len();
+            continue;
+        }
+
+        let moved: Vec<ChatMessage> = intervening_indices
+            .iter()
+            .map(|idx| messages[*idx].clone())
+            .collect();
+        let assistant = messages[i].clone();
+        let mut tool_results = Vec::with_capacity(call_ids.len());
+        for call_id in &call_ids {
+            if let Some(idx) = found_indices.iter().find(|idx| {
+                matches!(
+                    &messages[**idx],
+                    ChatMessage::Tool { tool_call_id, .. } if tool_call_id == call_id
+                )
+            }) {
+                tool_results.push(messages[*idx].clone());
             }
         }
 
-        // Advance past the assistant + all tool results
-        i += 1 + found;
+        let mut replacement = Vec::with_capacity(moved.len() + 1 + tool_results.len());
+        replacement.extend(moved);
+        replacement.push(assistant);
+        replacement.extend(tool_results);
+        messages.splice(i..j, replacement);
+
+        i += intervening_indices.len() + 1 + call_ids.len();
     }
+}
+
+fn push_canonical_items_as_chat(messages: &mut Vec<ChatMessage>, items: &[CanonicalItem]) {
+    let mut pending_reasoning: Option<String> = None;
+    let mut i = 0;
+    while i < items.len() {
+        match &items[i] {
+            CanonicalItem::Message(msg) => {
+                let chat_msg = canonical_message_to_chat(msg, &mut pending_reasoning);
+                messages.push(chat_msg);
+                i += 1;
+            }
+            CanonicalItem::Reasoning(reasoning) => {
+                append_reasoning(&mut pending_reasoning, &reasoning.text);
+                i += 1;
+            }
+            CanonicalItem::FunctionCall(_) => {
+                let start = i;
+                let mut tool_calls = Vec::new();
+                while let Some(CanonicalItem::FunctionCall(call)) = items.get(i) {
+                    tool_calls.push(ChatToolCall {
+                        id: call.call_id.clone(),
+                        call_type: "function".into(),
+                        function: ChatFunctionCall {
+                            name: Some(call.name.clone()),
+                            arguments: call.arguments.clone(),
+                        },
+                    });
+                    i += 1;
+                }
+
+                let call_ids: Vec<String> = tool_calls.iter().map(|tc| tc.id.clone()).collect();
+                let mut outputs = Vec::new();
+                let mut j = i;
+                while outputs.len() < call_ids.len() {
+                    match items.get(j) {
+                        Some(CanonicalItem::FunctionCallOutput(output))
+                            if call_ids.iter().any(|id| id == &output.call_id)
+                                && !outputs.iter().any(
+                                    |existing: &CanonicalFunctionCallOutput| {
+                                        existing.call_id == output.call_id
+                                    },
+                                ) =>
+                        {
+                            outputs.push(output.clone());
+                            j += 1;
+                        }
+                        _ => break,
+                    }
+                }
+
+                if start == i {
+                    i += 1;
+                    continue;
+                }
+
+                messages.push(ChatMessage::Assistant {
+                    content: None,
+                    name: None,
+                    tool_calls: Some(tool_calls),
+                    reasoning_content: pending_reasoning.take(),
+                });
+
+                if outputs.len() == call_ids.len() {
+                    for call_id in &call_ids {
+                        if let Some(output) =
+                            outputs.iter().find(|output| &output.call_id == call_id)
+                        {
+                            messages.push(ChatMessage::Tool {
+                                content: ChatContent::Text(output.output.clone()),
+                                tool_call_id: output.call_id.clone(),
+                            });
+                        }
+                    }
+                    i = j;
+                }
+            }
+            CanonicalItem::FunctionCallOutput(output) => {
+                messages.push(ChatMessage::Tool {
+                    content: ChatContent::Text(output.output.clone()),
+                    tool_call_id: output.call_id.clone(),
+                });
+                i += 1;
+            }
+        }
+    }
+}
+
+fn append_reasoning(pending_reasoning: &mut Option<String>, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    let existing = pending_reasoning.get_or_insert_with(String::new);
+    if !existing.is_empty() {
+        existing.push('\n');
+    }
+    existing.push_str(text);
+}
+
+fn group_consecutive_assistant_tool_call_messages(messages: &mut Vec<ChatMessage>) {
+    let mut i = 0;
+    while i < messages.len() {
+        let mut run_end = i;
+        let mut tool_calls = Vec::new();
+        let mut content = None;
+        let mut name = None;
+        let mut reasoning_content: Option<String> = None;
+
+        while let Some(ChatMessage::Assistant {
+            content: msg_content,
+            name: msg_name,
+            tool_calls: Some(calls),
+            reasoning_content: msg_reasoning,
+        }) = messages.get(run_end)
+            && calls.len() == 1
+        {
+            if content.is_none() {
+                content = msg_content.clone();
+            }
+            if name.is_none() {
+                name = msg_name.clone();
+            }
+            if let Some(rc) = msg_reasoning
+                && !rc.is_empty()
+            {
+                append_reasoning(&mut reasoning_content, rc);
+            }
+            tool_calls.push(calls[0].clone());
+            run_end += 1;
+        }
+
+        if tool_calls.len() <= 1 {
+            i += 1;
+            continue;
+        }
+
+        let call_ids: Vec<String> = tool_calls.iter().map(|tc| tc.id.clone()).collect();
+        let mut tool_results = Vec::new();
+        let mut j = run_end;
+        while tool_results.len() < call_ids.len() {
+            match messages.get(j) {
+                Some(ChatMessage::Tool { tool_call_id, .. })
+                    if call_ids.iter().any(|id| id == tool_call_id)
+                        && !tool_results.iter().any(|msg| {
+                            matches!(
+                                msg,
+                                ChatMessage::Tool { tool_call_id: existing, .. } if existing == tool_call_id
+                            )
+                        }) =>
+                {
+                    tool_results.push(messages[j].clone());
+                    j += 1;
+                }
+                _ => break,
+            }
+        }
+
+        if tool_results.len() != call_ids.len() {
+            i = run_end;
+            continue;
+        }
+
+        let mut replacement = Vec::with_capacity(1 + tool_results.len());
+        replacement.push(ChatMessage::Assistant {
+            content,
+            name,
+            tool_calls: Some(tool_calls),
+            reasoning_content,
+        });
+        for call_id in &call_ids {
+            if let Some(output) = tool_results.iter().find(|msg| {
+                matches!(
+                    msg,
+                    ChatMessage::Tool { tool_call_id, .. } if tool_call_id == call_id
+                )
+            }) {
+                replacement.push(output.clone());
+            }
+        }
+        messages.splice(i..j, replacement);
+        i += 1 + call_ids.len();
+    }
+}
+
+fn reorder_adjacent_tool_results(
+    messages: &mut Vec<ChatMessage>,
+    assistant_idx: usize,
+    call_ids: &[String],
+) {
+    if assistant_idx + call_ids.len() >= messages.len() {
+        return;
+    }
+    let start = assistant_idx + 1;
+    let end = start + call_ids.len();
+    let segment = &messages[start..end];
+    if !segment.iter().all(|msg| {
+        matches!(msg, ChatMessage::Tool { tool_call_id, .. } if call_ids.iter().any(|id| id == tool_call_id))
+    }) {
+        return;
+    }
+
+    let mut ordered = Vec::with_capacity(call_ids.len());
+    for call_id in call_ids {
+        let Some(msg) = segment.iter().find(
+            |msg| matches!(msg, ChatMessage::Tool { tool_call_id, .. } if tool_call_id == call_id),
+        ) else {
+            return;
+        };
+        ordered.push(msg.clone());
+    }
+    messages.splice(start..end, ordered);
 }
 
 fn canonical_message_to_chat(
@@ -1112,17 +1327,26 @@ mod adjacency_tests {
     use crate::chat::{ChatContent, ChatFunctionCall, ChatMessage, ChatToolCall};
 
     fn assistant_tool_call(id: &str, name: &str, args: &str) -> ChatMessage {
+        assistant_tool_calls(vec![(id, name, args)])
+    }
+
+    fn assistant_tool_calls(calls: Vec<(&str, &str, &str)>) -> ChatMessage {
         ChatMessage::Assistant {
             content: None,
             name: None,
-            tool_calls: Some(vec![ChatToolCall {
-                id: id.to_string(),
-                call_type: "function".into(),
-                function: ChatFunctionCall {
-                    name: Some(name.to_string()),
-                    arguments: args.to_string(),
-                },
-            }]),
+            tool_calls: Some(
+                calls
+                    .into_iter()
+                    .map(|(id, name, args)| ChatToolCall {
+                        id: id.to_string(),
+                        call_type: "function".into(),
+                        function: ChatFunctionCall {
+                            name: Some(name.to_string()),
+                            arguments: args.to_string(),
+                        },
+                    })
+                    .collect(),
+            ),
             reasoning_content: None,
         }
     }
@@ -1179,6 +1403,94 @@ mod adjacency_tests {
         ];
         let expected = msgs.clone();
         enforce_tool_call_adjacency(&mut msgs);
+        assert_eq!(msgs, expected);
+    }
+
+    #[test]
+    fn keeps_completed_parallel_tool_calls_grouped_and_orders_results() {
+        let mut msgs = vec![
+            user_msg("hello"),
+            assistant_tool_calls(vec![
+                ("call_1", "exec_command", r#"{"cmd":"one"}"#),
+                ("call_2", "exec_command", r#"{"cmd":"two"}"#),
+            ]),
+            tool_result("call_2", "two"),
+            tool_result("call_1", "one"),
+            user_msg("next"),
+        ];
+
+        enforce_tool_call_adjacency(&mut msgs);
+
+        assert_eq!(msgs.len(), 5);
+        assert!(matches!(&msgs[0], ChatMessage::User { .. }));
+        match &msgs[1] {
+            ChatMessage::Assistant {
+                tool_calls: Some(calls),
+                ..
+            } => {
+                assert_eq!(calls.len(), 2);
+                assert_eq!(calls[0].id, "call_1");
+                assert_eq!(calls[1].id, "call_2");
+            }
+            other => panic!("expected assistant tool call group, got {other:?}"),
+        }
+        assert!(matches!(
+            &msgs[2],
+            ChatMessage::Tool { tool_call_id, .. } if tool_call_id == "call_1"
+        ));
+        assert!(matches!(
+            &msgs[3],
+            ChatMessage::Tool { tool_call_id, .. } if tool_call_id == "call_2"
+        ));
+        assert!(matches!(&msgs[4], ChatMessage::User { .. }));
+    }
+
+    #[test]
+    fn groups_flat_consecutive_assistant_tool_calls() {
+        let mut msgs = vec![
+            user_msg("hello"),
+            assistant_tool_call("call_1", "exec_command", r#"{"cmd":"one"}"#),
+            assistant_tool_call("call_2", "exec_command", r#"{"cmd":"two"}"#),
+            tool_result("call_2", "two"),
+            tool_result("call_1", "one"),
+        ];
+
+        enforce_tool_call_adjacency(&mut msgs);
+
+        assert_eq!(msgs.len(), 4);
+        match &msgs[1] {
+            ChatMessage::Assistant {
+                tool_calls: Some(calls),
+                ..
+            } => {
+                assert_eq!(calls.len(), 2);
+                assert_eq!(calls[0].id, "call_1");
+                assert_eq!(calls[1].id, "call_2");
+            }
+            other => panic!("expected grouped assistant tool call, got {other:?}"),
+        }
+        assert!(
+            matches!(&msgs[2], ChatMessage::Tool { tool_call_id, .. } if tool_call_id == "call_1")
+        );
+        assert!(
+            matches!(&msgs[3], ChatMessage::Tool { tool_call_id, .. } if tool_call_id == "call_2")
+        );
+    }
+
+    #[test]
+    fn leaves_incomplete_parallel_tool_calls_grouped() {
+        let mut msgs = vec![
+            user_msg("hello"),
+            assistant_tool_calls(vec![
+                ("call_1", "exec_command", r#"{"cmd":"one"}"#),
+                ("call_2", "exec_command", r#"{"cmd":"two"}"#),
+            ]),
+            tool_result("call_1", "one"),
+        ];
+        let expected = msgs.clone();
+
+        enforce_tool_call_adjacency(&mut msgs);
+
         assert_eq!(msgs, expected);
     }
 

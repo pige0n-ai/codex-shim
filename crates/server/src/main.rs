@@ -44,6 +44,9 @@ struct Cli {
     /// State backend to use, for example memory or sqlite.
     #[arg(long)]
     state: Option<String>,
+    /// SQLite state database path when --state sqlite is used.
+    #[arg(long)]
+    sqlite_path: Option<String>,
     /// Toggle provider reasoning defaults: enabled or disabled.
     #[arg(long)]
     thinking: Option<String>,
@@ -330,6 +333,9 @@ async fn run_server(cli: &Cli) -> anyhow::Result<()> {
     if let Some(state) = &cli.state {
         config.state.backend = state.clone();
     }
+    if let Some(path) = &cli.sqlite_path {
+        config.state.sqlite_path = Some(path.clone());
+    }
     if let Some(thinking) = &cli.thinking {
         config.reasoning.enabled = thinking == "enabled";
     }
@@ -380,7 +386,7 @@ fn cmd_generate_catalog(
             reasoning_levels: reasoning_levels
                 .map(|s| s.split(',').map(|e| e.trim().to_string()).collect()),
             priority: Some(10),
-            base_instructions: Some(String::new()),
+            base_instructions: None,
             auto_compact_token_limit: None,
             supports_search_tool: Some(false),
             supports_reasoning_summaries: Some(false),
@@ -2489,7 +2495,7 @@ mod tests {
             vision: Some(false),
             reasoning_levels: Some(vec!["high".into()]),
             priority: Some(10),
-            base_instructions: Some(String::new()),
+            base_instructions: None,
             auto_compact_token_limit: None,
             supports_search_tool: Some(supports_search_tool),
             supports_reasoning_summaries: Some(false),

@@ -39,6 +39,8 @@ jobs:
         run: sudo apt-get install -y musl-tools
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
 
       - name: Format
         run: cargo fmt --check
@@ -114,6 +116,8 @@ jobs:
             libxdo-dev
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
 
       - name: Test workspace defaults
         run: cargo test

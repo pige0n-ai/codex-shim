@@ -32,4 +32,5 @@ inquire = "0.7"
 rusqlite = { version = "0.33", features = ["bundled"], optional = true }
 
 [features]
+default = ["sqlite"]
 sqlite = ["rusqlite"]

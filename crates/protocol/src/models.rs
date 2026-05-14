@@ -40,7 +40,10 @@ pub struct ModelInfo {
     pub base_instructions: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_compact_token_limit: Option<i64>,
-    #[serde(default = "default_web_search_tool_type")]
+    #[serde(
+        default = "default_web_search_tool_type",
+        skip_serializing_if = "is_default_web_search_tool_type"
+    )]
     pub web_search_tool_type: String,
 }
 
@@ -182,7 +185,12 @@ pub fn build_model_info(spec: &CatalogModelSpec, caps: &ProviderCapabilities) ->
             Vec::new()
         }
     });
-    let default_reasoning_level = reasoning_levels.first().cloned();
+    let default_reasoning_level = Some(
+        reasoning_levels
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "none".to_string()),
+    );
     let tool_calling = spec.tool_calling.unwrap_or(caps.supports_function_tools);
     let vision = spec.vision.unwrap_or(caps.supports_vision_input);
 
@@ -235,19 +243,37 @@ pub fn build_model_info(spec: &CatalogModelSpec, caps: &ProviderCapabilities) ->
         supports_search_tool: spec.supports_search_tool.unwrap_or(false),
         experimental_supported_tools: Vec::new(),
         additional_speed_tiers: Vec::new(),
-        base_instructions: spec.base_instructions.clone().unwrap_or_default(),
+        base_instructions: spec
+            .base_instructions
+            .clone()
+            .unwrap_or_else(default_codex_base_instructions),
         auto_compact_token_limit: spec.auto_compact_token_limit,
         web_search_tool_type: default_web_search_tool_type(),
     }
+}
+
+pub const DEFAULT_CODEX_BASE_INSTRUCTIONS: &str =
+    include_str!("prompts/base_instructions/default.md");
+
+fn default_codex_base_instructions() -> String {
+    DEFAULT_CODEX_BASE_INSTRUCTIONS.to_string()
 }
 
 fn default_web_search_tool_type() -> String {
     "text".into()
 }
 
+fn is_default_web_search_tool_type(value: &String) -> bool {
+    value == "text"
+}
+
 #[cfg(test)]
 mod context_window_tests {
-    use super::parse_context_window;
+    use crate::provider_caps::ProviderCapabilities;
+
+    use super::{
+        CatalogModelSpec, DEFAULT_CODEX_BASE_INSTRUCTIONS, build_model_info, parse_context_window,
+    };
 
     #[test]
     fn plain_integer() {
@@ -305,5 +331,61 @@ mod context_window_tests {
         let json = r#"{"slug":"test-model","context_window":131072}"#;
         let spec: super::CatalogModelSpec = serde_json::from_str(json).unwrap();
         assert_eq!(spec.context_window, 131072);
+    }
+
+    fn catalog_spec(base_instructions: Option<String>) -> CatalogModelSpec {
+        CatalogModelSpec {
+            slug: "test-model".to_string(),
+            display_name: None,
+            description: None,
+            context_window: 131072,
+            tool_calling: Some(true),
+            vision: Some(false),
+            reasoning_levels: None,
+            priority: None,
+            base_instructions,
+            auto_compact_token_limit: None,
+            supports_search_tool: Some(false),
+            supports_reasoning_summaries: Some(false),
+            apply_patch_tool_type: None,
+            supports_image_detail_original: Some(false),
+        }
+    }
+
+    #[test]
+    fn absent_base_instructions_use_codex_default() {
+        let info = build_model_info(&catalog_spec(None), &ProviderCapabilities::generic_chat());
+
+        assert_eq!(info.base_instructions, DEFAULT_CODEX_BASE_INSTRUCTIONS);
+        assert!(
+            info.base_instructions
+                .starts_with("You are Codex, a coding agent")
+        );
+    }
+
+    #[test]
+    fn explicit_empty_base_instructions_are_preserved() {
+        let info = build_model_info(
+            &catalog_spec(Some(String::new())),
+            &ProviderCapabilities::generic_chat(),
+        );
+
+        assert_eq!(info.base_instructions, "");
+    }
+
+    #[test]
+    fn non_reasoning_catalog_still_serializes_default_reasoning_level() {
+        let info = build_model_info(&catalog_spec(None), &ProviderCapabilities::generic_chat());
+
+        assert_eq!(info.default_reasoning_level.as_deref(), Some("none"));
+        assert!(info.supported_reasoning_levels.is_empty());
+    }
+
+    #[test]
+    fn default_web_search_tool_type_is_omitted_from_catalog_json() {
+        let info = build_model_info(&catalog_spec(None), &ProviderCapabilities::generic_chat());
+        let json = serde_json::to_value(&info).unwrap();
+
+        assert!(json.get("web_search_tool_type").is_none());
     }
 }

@@ -107,6 +107,122 @@ mod tests {
     }
 
     #[test]
+    fn flat_parallel_tool_calls_become_one_chat_assistant() {
+        let req = ResponsesCreateRequest {
+            model: "test".into(),
+            input: ResponseInput::Items(vec![
+                InputItem::Reasoning {
+                    id: None,
+                    content: None,
+                    summary: Some(vec![SummaryPart::SummaryText {
+                        text: "think once".into(),
+                    }]),
+                    status: None,
+                },
+                InputItem::FunctionCall {
+                    id: None,
+                    call_id: "call_a".into(),
+                    name: "exec_command".into(),
+                    arguments: r#"{"cmd":"a"}"#.into(),
+                    status: Some("completed".into()),
+                },
+                InputItem::FunctionCall {
+                    id: None,
+                    call_id: "call_b".into(),
+                    name: "exec_command".into(),
+                    arguments: r#"{"cmd":"b"}"#.into(),
+                    status: Some("completed".into()),
+                },
+                InputItem::FunctionCall {
+                    id: None,
+                    call_id: "call_c".into(),
+                    name: "exec_command".into(),
+                    arguments: r#"{"cmd":"c"}"#.into(),
+                    status: Some("completed".into()),
+                },
+                InputItem::FunctionCallOutput {
+                    id: None,
+                    call_id: "call_b".into(),
+                    output: serde_json::Value::String("b".into()),
+                    status: None,
+                },
+                InputItem::FunctionCallOutput {
+                    id: None,
+                    call_id: "call_a".into(),
+                    output: serde_json::Value::String("a".into()),
+                    status: None,
+                },
+                InputItem::FunctionCallOutput {
+                    id: None,
+                    call_id: "call_c".into(),
+                    output: serde_json::Value::String("c".into()),
+                    status: None,
+                },
+            ]),
+            ..default_req()
+        };
+
+        let canonical = CanonicalRequest::from_request(&req, vec![]).unwrap();
+        let chat = canonical.into_chat_request(&ProviderCapabilities::deepseek_chat());
+
+        assert_eq!(chat.messages.len(), 4);
+        match &chat.messages[0] {
+            ChatMessage::Assistant {
+                tool_calls: Some(tool_calls),
+                reasoning_content,
+                ..
+            } => {
+                assert_eq!(reasoning_content.as_deref(), Some("think once"));
+                assert_eq!(tool_calls.len(), 3);
+                assert_eq!(tool_calls[0].id, "call_a");
+                assert_eq!(tool_calls[1].id, "call_b");
+                assert_eq!(tool_calls[2].id, "call_c");
+            }
+            other => panic!("expected grouped assistant tool call, got {other:?}"),
+        }
+        assert!(
+            matches!(&chat.messages[1], ChatMessage::Tool { tool_call_id, .. } if tool_call_id == "call_a")
+        );
+        assert!(
+            matches!(&chat.messages[2], ChatMessage::Tool { tool_call_id, .. } if tool_call_id == "call_b")
+        );
+        assert!(
+            matches!(&chat.messages[3], ChatMessage::Tool { tool_call_id, .. } if tool_call_id == "call_c")
+        );
+    }
+
+    #[test]
+    fn local_shell_call_arguments_are_valid_json() {
+        let req = ResponsesCreateRequest {
+            model: "test".into(),
+            input: ResponseInput::Items(vec![InputItem::LocalShellCall {
+                id: None,
+                call_id: "call_shell".into(),
+                command: "python fixture.py".into(),
+                cwd: Some("/tmp/project".into()),
+                timeout_ms: Some(1000),
+            }]),
+            ..default_req()
+        };
+
+        let canonical = CanonicalRequest::from_request(&req, vec![]).unwrap();
+        let chat = canonical.into_chat_request(&ProviderCapabilities::generic_chat());
+
+        let ChatMessage::Assistant {
+            tool_calls: Some(tool_calls),
+            ..
+        } = &chat.messages[0]
+        else {
+            panic!("expected assistant tool call");
+        };
+        let args: serde_json::Value =
+            serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
+        assert_eq!(args["command"], "python fixture.py");
+        assert_eq!(args["cwd"], "/tmp/project");
+        assert_eq!(args["timeout_ms"], 1000);
+    }
+
+    #[test]
     fn into_native_responses_json_basic() {
         let req = ResponsesCreateRequest {
             model: "test".into(),

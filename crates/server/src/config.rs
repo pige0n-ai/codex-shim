@@ -584,7 +584,7 @@ impl Config {
                 vision: Some(caps.supports_vision_input),
                 reasoning_levels,
                 priority: Some(10),
-                base_instructions: Some(String::new()),
+                base_instructions: None,
                 auto_compact_token_limit: None,
                 supports_search_tool: Some(false),
                 supports_reasoning_summaries: Some(false),
@@ -608,6 +608,18 @@ impl Config {
         if self.features.is_some() {
             anyhow::bail!(
                 "features.* is no longer accepted in shim config. Remove the 'features' block; runtime behavior is derived from provider capabilities and model catalog metadata."
+            );
+        }
+        match self.state.backend.as_str() {
+            "memory" | "ram" | "sqlite" => {}
+            other => anyhow::bail!(
+                "state.backend must be one of `memory`, `ram`, or `sqlite`, got `{other}`"
+            ),
+        }
+        #[cfg(not(feature = "sqlite"))]
+        if self.state.backend == "sqlite" {
+            anyhow::bail!(
+                "state.backend = sqlite requires building codex-shim with the `sqlite` feature"
             );
         }
         if self.models.catalog.is_empty() && self.models.default.trim().is_empty() {
@@ -735,6 +747,14 @@ mod tests {
         config.features = Some(FeaturesConfig::default());
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("features.* is no longer accepted"));
+    }
+
+    #[test]
+    fn validate_rejects_unknown_state_backend() {
+        let mut config = valid_config();
+        config.state.backend = "disk".into();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("state.backend must be one of"));
     }
 
     #[test]
