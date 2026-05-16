@@ -45,6 +45,14 @@ pub enum Scenario {
         #[serde(default = "default_model")]
         model: String,
     },
+    /// DeepSeek-style chat stream with reasoning_content before a tool call.
+    ChatStreamReasoningToolCall {
+        reasoning: String,
+        tool_name: String,
+        tool_args: serde_json::Value,
+        #[serde(default = "default_model")]
+        model: String,
+    },
     /// Responses non-stream JSON response.
     ResponsesNonStream {
         response_id: String,
@@ -215,6 +223,18 @@ async fn chat_completions(
                 "choices": [{"index":0,"message":{"role":"assistant","content":"tool"},"finish_reason":"stop"}]
             })).into_response()
         }
+        Scenario::ChatStreamReasoningToolCall {
+            reasoning,
+            tool_name,
+            tool_args,
+            model,
+        } if stream => sse_chat_stream_reasoning_tool_call(reasoning, tool_name, tool_args, model),
+        Scenario::ChatStreamReasoningToolCall { .. } => {
+            Json(serde_json::json!({
+                "id": "chatcmpl_mock", "object": "chat.completion", "model": "mock-model",
+                "choices": [{"index":0,"message":{"role":"assistant","content":"tool"},"finish_reason":"stop"}]
+            })).into_response()
+        }
         Scenario::Upstream401 => {
             (axum::http::StatusCode::UNAUTHORIZED,
              Json(serde_json::json!({"error": {"message": "Unauthorized", "type": "authentication_error", "code": "invalid_api_key"}}))
@@ -307,6 +327,57 @@ fn sse_chat_stream_tool_call(
             "id": "chatcmpl_tool_1", "object": "chat.completion.chunk", "created": 1714771200,
             "model": model,
             "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]
+        });
+        yield Ok(axum::response::sse::Event::default().data(serde_json::to_string(&final_chunk).unwrap()));
+        yield Ok(axum::response::sse::Event::default().data("[DONE]"));
+    };
+
+    Sse::new(stream).into_response()
+}
+
+fn sse_chat_stream_reasoning_tool_call(
+    reasoning: &str,
+    tool_name: &str,
+    tool_args: &serde_json::Value,
+    model: &str,
+) -> Response {
+    let reasoning = reasoning.to_string();
+    let tool_name = tool_name.to_string();
+    let tool_args = tool_args.clone();
+    let model = model.to_string();
+
+    let stream = async_stream::stream! {
+        let reasoning_chunk = serde_json::json!({
+            "id": "chatcmpl_reasoning_tool_1",
+            "object": "chat.completion.chunk",
+            "created": 1714771200,
+            "model": model,
+            "choices": [{"index": 0, "delta": {"reasoning_content": reasoning}, "finish_reason": null}]
+        });
+        yield Ok::<_, std::convert::Infallible>(
+            axum::response::sse::Event::default().data(serde_json::to_string(&reasoning_chunk).unwrap())
+        );
+
+        let tool_chunk = serde_json::json!({
+            "id": "chatcmpl_reasoning_tool_1",
+            "object": "chat.completion.chunk",
+            "created": 1714771200,
+            "model": model,
+            "choices": [{"index": 0, "delta": {
+                "tool_calls": [{"index": 0, "id": "call_mock_1", "type": "function",
+                    "function": {"name": tool_name, "arguments": serde_json::to_string(&tool_args).unwrap()}
+                }]
+            }, "finish_reason": null}]
+        });
+        yield Ok(axum::response::sse::Event::default().data(serde_json::to_string(&tool_chunk).unwrap()));
+
+        let final_chunk = serde_json::json!({
+            "id": "chatcmpl_reasoning_tool_1",
+            "object": "chat.completion.chunk",
+            "created": 1714771200,
+            "model": model,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
         });
         yield Ok(axum::response::sse::Event::default().data(serde_json::to_string(&final_chunk).unwrap()));
         yield Ok(axum::response::sse::Event::default().data("[DONE]"));
