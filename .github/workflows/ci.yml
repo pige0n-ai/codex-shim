@@ -38,3 +38,29 @@ jobs:
         env:
           CODEX_SHIM_BIN: ${{ github.workspace }}/target/debug/codex-shim
         run: cargo test -p e2e-codex --test codex_mock -- --nocapture
+
+  platform-test:
+    name: Platform Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-15-intel
+          - macos-15
+          - windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+
+      - name: Test workspace defaults
+        run: cargo test
+
+      - name: Build CLI release binary
+        run: cargo build --release -p codex-shim
