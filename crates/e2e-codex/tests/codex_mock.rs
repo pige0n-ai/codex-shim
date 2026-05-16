@@ -6,11 +6,12 @@
 // Tests that require `codex` binary are behind #[ignore] by default.
 // Run them with: cargo test -p e2e-codex codex_mock_ -- --ignored
 
-use e2e_codex::mock_upstream::{MockUpstream, Scenario};
+use e2e_codex::mock_upstream::{CapturedRequest, MockUpstream, Scenario};
 use e2e_codex::{
     ShimProcess, generate_codex_home, generate_codex_home_project_trust_only, generate_shim_config,
     generate_shim_config_native, run_codex_exec, write_project_codex_config,
 };
+use serde_json::Value;
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -34,6 +35,71 @@ async fn setup(
     let config_path = generate_shim_config(tmp.path(), &mock.base_url(), shim_provider, model)?;
     let shim = ShimProcess::start(&config_path).await?;
     Ok((mock, shim, tmp, workdir))
+}
+
+fn response_id_from_sse(body: &str) -> String {
+    for line in body.lines() {
+        let Some(data) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        if data == "[DONE]" {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        if value["type"] == "response.created"
+            && let Some(id) = value["response"]["id"].as_str()
+        {
+            return id.to_string();
+        }
+    }
+    panic!("stream did not contain a response.created id:\n{body}");
+}
+
+fn last_chat_request(requests: &[CapturedRequest]) -> &Value {
+    &requests
+        .iter()
+        .filter(|r| r.method == "POST" && r.path == "/v1/chat/completions")
+        .last()
+        .expect("expected upstream chat request")
+        .body
+}
+
+fn assistant_tool_call_index(messages: &[Value], call_id: &str) -> usize {
+    messages
+        .iter()
+        .position(|message| {
+            message["role"] == "assistant"
+                && message["tool_calls"]
+                    .as_array()
+                    .map(|tool_calls| tool_calls.iter().any(|tc| tc["id"] == call_id))
+                    .unwrap_or(false)
+        })
+        .unwrap_or_else(|| panic!("missing assistant tool call {call_id}: {messages:#?}"))
+}
+
+fn assert_tool_result_immediately_after(messages: &[Value], assistant_idx: usize, call_id: &str) {
+    let tool = messages
+        .get(assistant_idx + 1)
+        .unwrap_or_else(|| panic!("missing tool result after assistant: {messages:#?}"));
+    assert_eq!(tool["role"], "tool");
+    assert_eq!(tool["tool_call_id"], call_id);
+}
+
+fn exec_command_tool() -> Value {
+    serde_json::json!({
+        "type": "function",
+        "name": "exec_command",
+        "description": "Run a shell command",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "cmd": {"type": "string"}
+            },
+            "required": ["cmd"]
+        }
+    })
 }
 
 // ── A. Codex subprocess smoke ────────────────────────────────────
@@ -546,6 +612,201 @@ async fn direct_stateless_previous_response_id_materialization() {
     );
 
     drop(shim);
+    drop(mock);
+}
+
+// ── F2. Provider behavior quality gates ─────────────────────────
+
+#[tokio::test]
+async fn direct_deepseek_reasoning_recovery_preserves_tool_reasoning() {
+    let mock = MockUpstream::start(Scenario::ChatStreamReasoningToolCall {
+        reasoning: "need shell before calling exec_command".into(),
+        tool_name: "exec_command".into(),
+        tool_args: serde_json::json!({"cmd": "pwd"}),
+        model: "mock-model".into(),
+    })
+    .await
+    .unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path =
+        generate_shim_config(tmp.path(), &mock.base_url(), "deepseek-chat", "mock-model").unwrap();
+    let shim = ShimProcess::start(&config_path).await.unwrap();
+    let client = reqwest::Client::new();
+    let auth = "local-shim-test-token";
+
+    let first = client
+        .post(format!("{}/responses", shim.base_url()))
+        .bearer_auth(auth)
+        .json(&serde_json::json!({
+            "model": "mock-model",
+            "input": "Use the exec_command tool.",
+            "stream": true,
+            "tools": [exec_command_tool()]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(first.status().is_success());
+    let first_body = first.text().await.unwrap();
+    let first_response_id = response_id_from_sse(&first_body);
+    assert!(
+        first_body.contains("response.completed"),
+        "first stream must complete before previous_response_id continuation"
+    );
+
+    mock.state.set_scenario(Scenario::ChatNonStreamText {
+        text: "done".into(),
+        model: "mock-model".into(),
+    });
+
+    let second = client
+        .post(format!("{}/responses", shim.base_url()))
+        .bearer_auth(auth)
+        .json(&serde_json::json!({
+            "model": "mock-model",
+            "previous_response_id": first_response_id,
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "call_mock_1",
+                "output": "{\"stdout\":\"/tmp/project\"}"
+            }],
+            "stream": false,
+            "tools": [exec_command_tool()]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(second.status().is_success());
+    let _second_body: Value = second.json().await.unwrap();
+
+    drop(shim);
+    let requests = mock.state.take_requests();
+    let chat_req = last_chat_request(&requests);
+    let messages = chat_req["messages"]
+        .as_array()
+        .expect("chat messages array");
+    let assistant_idx = assistant_tool_call_index(messages, "call_mock_1");
+    let assistant = &messages[assistant_idx];
+
+    assert_eq!(
+        assistant["reasoning_content"], "need shell before calling exec_command",
+        "DeepSeek reasoning_content must survive previous_response_id tool continuation"
+    );
+    assert_tool_result_immediately_after(messages, assistant_idx, "call_mock_1");
+    drop(mock);
+}
+
+#[tokio::test]
+async fn direct_tool_call_adjacency_reorders_intervening_messages() {
+    let mock = MockUpstream::start(Scenario::ChatNonStreamText {
+        text: "ok".into(),
+        model: "mock-model".into(),
+    })
+    .await
+    .unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path =
+        generate_shim_config(tmp.path(), &mock.base_url(), "deepseek-chat", "mock-model").unwrap();
+    let shim = ShimProcess::start(&config_path).await.unwrap();
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{}/responses", shim.base_url()))
+        .bearer_auth("local-shim-test-token")
+        .json(&serde_json::json!({
+            "model": "mock-model",
+            "input": [
+                {"type": "message", "role": "user", "content": "before"},
+                {"type": "function_call", "call_id": "call_a", "name": "exec_command", "arguments": "{\"cmd\":\"pwd\"}"},
+                {"type": "message", "role": "user", "content": "intervening status update"},
+                {"type": "function_call_output", "call_id": "call_a", "output": "ok"}
+            ],
+            "stream": false,
+            "tools": [exec_command_tool()]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let _body: Value = resp.json().await.unwrap();
+
+    drop(shim);
+    let requests = mock.state.take_requests();
+    let chat_req = last_chat_request(&requests);
+    let messages = chat_req["messages"]
+        .as_array()
+        .expect("chat messages array");
+    let assistant_idx = assistant_tool_call_index(messages, "call_a");
+
+    assert_tool_result_immediately_after(messages, assistant_idx, "call_a");
+    assert!(
+        messages[..assistant_idx]
+            .iter()
+            .any(|message| message["role"] == "user"
+                && message["content"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("intervening")),
+        "intervening non-tool messages must move before the assistant tool call"
+    );
+    drop(mock);
+}
+
+#[tokio::test]
+async fn direct_parallel_tool_calls_grouped_and_outputs_ordered() {
+    let mock = MockUpstream::start(Scenario::ChatNonStreamText {
+        text: "ok".into(),
+        model: "mock-model".into(),
+    })
+    .await
+    .unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path =
+        generate_shim_config(tmp.path(), &mock.base_url(), "deepseek-chat", "mock-model").unwrap();
+    let shim = ShimProcess::start(&config_path).await.unwrap();
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{}/responses", shim.base_url()))
+        .bearer_auth("local-shim-test-token")
+        .json(&serde_json::json!({
+            "model": "mock-model",
+            "input": [
+                {"type": "message", "role": "user", "content": "run both commands"},
+                {"type": "function_call", "call_id": "call_a", "name": "exec_command", "arguments": "{\"cmd\":\"pwd\"}"},
+                {"type": "function_call", "call_id": "call_b", "name": "exec_command", "arguments": "{\"cmd\":\"ls\"}"},
+                {"type": "function_call_output", "call_id": "call_b", "output": "ls output"},
+                {"type": "function_call_output", "call_id": "call_a", "output": "pwd output"}
+            ],
+            "stream": false,
+            "parallel_tool_calls": true,
+            "tools": [exec_command_tool()]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let _body: Value = resp.json().await.unwrap();
+
+    drop(shim);
+    let requests = mock.state.take_requests();
+    let chat_req = last_chat_request(&requests);
+    let messages = chat_req["messages"]
+        .as_array()
+        .expect("chat messages array");
+    let assistant_idx = assistant_tool_call_index(messages, "call_a");
+    let assistant = &messages[assistant_idx];
+    let tool_calls = assistant["tool_calls"]
+        .as_array()
+        .expect("assistant tool_calls");
+
+    assert_eq!(tool_calls.len(), 2);
+    assert_eq!(tool_calls[0]["id"], "call_a");
+    assert_eq!(tool_calls[1]["id"], "call_b");
+    assert_eq!(messages[assistant_idx + 1]["role"], "tool");
+    assert_eq!(messages[assistant_idx + 1]["tool_call_id"], "call_a");
+    assert_eq!(messages[assistant_idx + 2]["role"], "tool");
+    assert_eq!(messages[assistant_idx + 2]["tool_call_id"], "call_b");
     drop(mock);
 }
 

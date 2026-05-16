@@ -26,7 +26,11 @@ jobs:
     steps:
       - id: detect
         run: |
-          TAG="${GITHUB_REF_NAME:-${{ github.event.inputs.tag }}}"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
           if [[ "$TAG" == gui-v* ]]; then
             echo "build-gui=true" >> "$GITHUB_OUTPUT"
             echo "release-name=codex-shim-gui ${TAG#gui-}" >> "$GITHUB_OUTPUT"
@@ -116,13 +120,15 @@ jobs:
           mkdir -p dist
           EXT=""
           [[ "${{ matrix.cli_bin }}" == *.exe ]] && EXT=".exe"
-          cp "target/${{ matrix.target }}/release/${{ matrix.cli_bin }}" "dist/codex-shim-${{ matrix.target }}${EXT}"
+          cp "target/${{ matrix.target }}/release/${{ matrix.cli_bin }}" "dist/codex-shim-${{ needs.detect.outputs.release-tag }}-${{ matrix.target }}${EXT}"
 
       - name: Package refs.zip (Linux CLI only)
         if: matrix.is_musl && needs.detect.outputs.build-gui == 'false'
         shell: bash
         run: |
-          python -c 'import zipfile,os; zf=zipfile.ZipFile("dist/refs.zip","w",zipfile.ZIP_DEFLATED); [zf.write(f,f) for f in ["README.md","LICENSE"]]; [[zf.write(os.path.join(r,f),os.path.join(r,f)) for f in fs] for r,_,fs in os.walk("examples")]; zf.close()'
+          python -c 'import os,zipfile; tag=os.environ["RELEASE_TAG"]; zf=zipfile.ZipFile(f"dist/codex-shim-{tag}-refs.zip","w",zipfile.ZIP_DEFLATED); [zf.write(f,f) for f in ["README.md","LICENSE"]]; [[zf.write(os.path.join(r,f),os.path.join(r,f)) for f in fs] for r,_,fs in os.walk("examples")]; zf.close()'
+        env:
+          RELEASE_TAG: ${{ needs.detect.outputs.release-tag }}
 
 
 
@@ -133,7 +139,7 @@ jobs:
           mkdir -p dist
           EXT=""
           [[ "${{ matrix.gui_bin }}" == *.exe ]] && EXT=".exe"
-          cp "gui/src-tauri/target/${{ matrix.target }}/release/${{ matrix.gui_bin }}" "dist/codex-shim-gui-${{ matrix.target }}${EXT}"
+          cp "gui/src-tauri/target/${{ matrix.target }}/release/${{ matrix.gui_bin }}" "dist/codex-shim-gui-${{ needs.detect.outputs.release-tag }}-${{ matrix.target }}${EXT}"
 
       - uses: actions/upload-artifact@v4
         with:

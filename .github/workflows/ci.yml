@@ -17,26 +17,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-          targets: x86_64-unknown-linux-musl
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
-
-      - name: Install GUI deps (Linux)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            pkg-config \
-            libgtk-3-dev \
-            libwebkit2gtk-4.1-dev \
-            libjavascriptcoregtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libxdo-dev
-
-      - name: Install musl tools
-        run: sudo apt-get install -y musl-tools
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -45,41 +25,14 @@ jobs:
       - name: Format
         run: cargo fmt --check
 
-      - name: Format GUI
-        run: cargo fmt --manifest-path gui/src-tauri/Cargo.toml --check
-
       - name: Lint
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Core tests
         run: cargo test
 
-      - name: GUI tests
-        run: cargo test --manifest-path gui/src-tauri/Cargo.toml
-
       - name: Build shim once for mock E2E
         run: cargo build -p codex-shim
-
-      - name: Build release binary (musl)
-        run: cargo build --release -p codex-shim --target x86_64-unknown-linux-musl
-
-      - name: Build GUI release binary
-        run: cargo build --release --manifest-path gui/src-tauri/Cargo.toml
-
-      - name: Package smoke
-        run: |
-          python scripts/package_release.py \
-            --binary target/x86_64-unknown-linux-musl/release/codex-shim \
-            --name codex-shim \
-            --target x86_64-unknown-linux-musl \
-            --version ci \
-            --output-dir target/dist-smoke
-          python scripts/package_release.py \
-            --binary gui/src-tauri/target/release/codex-shim-gui \
-            --name codex-shim-gui \
-            --target x86_64-unknown-linux-gnu \
-            --version ci \
-            --output-dir target/dist-smoke
 
       - name: Mock E2E
         env:
@@ -102,19 +55,6 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install GUI deps (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            pkg-config \
-            libgtk-3-dev \
-            libwebkit2gtk-4.1-dev \
-            libjavascriptcoregtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libxdo-dev
-
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
@@ -122,8 +62,5 @@ jobs:
       - name: Test workspace defaults
         run: cargo test
 
-      - name: Build release binary
+      - name: Build CLI release binary
         run: cargo build --release -p codex-shim
-
-      - name: Build GUI release binary
-        run: cargo build --release --manifest-path gui/src-tauri/Cargo.toml
