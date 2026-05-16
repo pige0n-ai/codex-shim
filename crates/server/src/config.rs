@@ -281,6 +281,8 @@ pub struct StateConfig {
     pub backend: String,
     #[serde(default = "default_ttl")]
     pub ttl_seconds: u64,
+    #[serde(default = "default_debug_artifact_ttl")]
+    pub debug_artifact_ttl_seconds: u64,
     #[serde(default = "default_cleanup_interval")]
     pub cleanup_interval_seconds: u64,
     #[serde(default)]
@@ -345,6 +347,9 @@ fn default_state_backend() -> String {
 }
 fn default_ttl() -> u64 {
     86400
+}
+fn default_debug_artifact_ttl() -> u64 {
+    600
 }
 fn default_cleanup_interval() -> u64 {
     3600
@@ -445,6 +450,7 @@ impl Default for StateConfig {
         Self {
             backend: default_state_backend(),
             ttl_seconds: default_ttl(),
+            debug_artifact_ttl_seconds: default_debug_artifact_ttl(),
             cleanup_interval_seconds: default_cleanup_interval(),
             sqlite_path: None,
         }
@@ -616,6 +622,9 @@ impl Config {
                 "state.backend must be one of `memory`, `ram`, or `sqlite`, got `{other}`"
             ),
         }
+        if self.state.debug_artifact_ttl_seconds == 0 {
+            anyhow::bail!("state.debug_artifact_ttl_seconds must be greater than 0");
+        }
         #[cfg(not(feature = "sqlite"))]
         if self.state.backend == "sqlite" {
             anyhow::bail!(
@@ -755,6 +764,14 @@ mod tests {
         config.state.backend = "disk".into();
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("state.backend must be one of"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_debug_artifact_ttl() {
+        let mut config = valid_config();
+        config.state.debug_artifact_ttl_seconds = 0;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("state.debug_artifact_ttl_seconds must be greater than 0"));
     }
 
     #[test]

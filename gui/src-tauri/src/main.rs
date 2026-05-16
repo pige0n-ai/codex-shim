@@ -922,6 +922,7 @@ models:
 state:
   backend: memory
   ttl_seconds: 86400
+  debug_artifact_ttl_seconds: 600
   cleanup_interval_seconds: 3600
 
 logging:

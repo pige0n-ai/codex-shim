@@ -9,12 +9,12 @@ use protocol::canonical::CanonicalRequest;
 use protocol::error::ApiError;
 use protocol::responses::ResponsesCreateRequest;
 use protocol::sse::ResponseSseEvent;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::AppState;
 use crate::sse_writer;
-use crate::store::StoredResponse;
+use crate::store::{DebugArtifact, DebugArtifactView, ResponseState};
 
 pub async fn create_response(
     State(state): State<AppState>,
@@ -85,13 +85,14 @@ pub async fn create_response(
     if let Some(ref prev_id) = req.previous_response_id
         && !state.profile.upstream_stateful()
     {
-        match state.store.get(prev_id) {
-            Some(record) => {
-                history_messages = record.canonical_messages;
+        match state.store.get_canonical_messages(prev_id) {
+            Ok(Some(messages)) => {
+                history_messages = messages;
             }
-            None => {
+            Ok(None) => {
                 return Err(record_error(ApiError::response_not_found(prev_id)));
             }
+            Err(error) => return Err(record_error(state_store_error(error))),
         }
     }
     // For stateful upstreams, previous_response_id will be forwarded directly
@@ -143,7 +144,11 @@ pub async fn create_response(
                     )
                 }));
             if needs_recovery {
-                let rc_map = build_reasoning_map(&state.store);
+                let call_ids = missing_reasoning_call_ids(&mapped.chat_request.messages);
+                let rc_map = state
+                    .store
+                    .find_reasoning_for_call_ids("default", &call_ids)
+                    .map_err(|error| record_error(state_store_error(error)))?;
                 for msg in &mut mapped.chat_request.messages {
                     if let protocol::chat::ChatMessage::Assistant {
                         reasoning_content,
@@ -236,24 +241,39 @@ async fn handle_non_stream(
     let canonical_messages =
         mapper::response_mapper::build_canonical_messages(&chat_req, &chat_response);
 
-    state.store.put(StoredResponse {
-        conversation_id: None,
-        id: mapped.response_id.clone(),
-        model: resolved_model,
-        created_at: response_object.created_at,
-        status: response_object.status.clone(),
-        request_json: serde_json::to_value(&req).unwrap_or_default(),
-        mapped_request_json: serde_json::to_value(&chat_req).unwrap_or_default(),
-        response_json: serde_json::to_value(&response_object).unwrap_or_default(),
-        upstream_error: None,
-        debug_annotations: debug_annotations_for_request(
-            &serde_json::to_value(&req).unwrap_or_default(),
-        ),
-        canonical_messages,
-        upstream_sse_events: vec![],
-        response_sse_events: vec![],
-    });
-    state.metrics.set_store_size(state.store.len());
+    let request_json = to_json_value("Responses request", &req).map_err(&record_error)?;
+    let mapped_request_json =
+        to_json_value("mapped Chat request", &chat_req).map_err(&record_error)?;
+    let response_json =
+        to_json_value("Responses object", &response_object).map_err(&record_error)?;
+    let debug_annotations = debug_annotations_for_request(&request_json);
+    persist_response_state(
+        &state,
+        ResponseState {
+            conversation_id: None,
+            id: mapped.response_id.clone(),
+            model: resolved_model,
+            created_at: response_object.created_at,
+            status: response_object.status.clone(),
+            response_json,
+            previous_response_id: req.previous_response_id.clone(),
+            canonical_messages,
+        },
+        DebugArtifact {
+            conversation_id: None,
+            id: mapped.response_id.clone(),
+            model: response_object.model.clone(),
+            created_at: response_object.created_at,
+            status: response_object.status.clone(),
+            request_json,
+            mapped_request_json,
+            upstream_error: None,
+            debug_annotations,
+            upstream_sse_events: vec![],
+            response_sse_events: vec![],
+        },
+    )
+    .map_err(&record_error)?;
     state
         .metrics
         .record_request_completed(response_object.usage.as_ref());
@@ -300,27 +320,40 @@ async fn handle_stream(
         tracing::warn!(%status, %body, "Upstream error response");
         let upstream_error = serde_json::from_str::<serde_json::Value>(&body)
             .unwrap_or_else(|_| serde_json::json!({ "body": body.clone() }));
-        state.store.put(StoredResponse {
-            conversation_id: None,
-            id: mapped.response_id.clone(),
-            model: resolved_model,
-            created_at: chrono::Utc::now().timestamp(),
-            status: "failed".into(),
-            request_json: serde_json::to_value(&_req).unwrap_or_default(),
-            mapped_request_json: serde_json::to_value(&chat_req).unwrap_or_default(),
-            response_json: serde_json::Value::Null,
-            upstream_error: Some(serde_json::json!({
-                "status": status,
-                "body": upstream_error,
-            })),
-            debug_annotations: debug_annotations_for_request(
-                &serde_json::to_value(&_req).unwrap_or_default(),
-            ),
-            canonical_messages: chat_req.messages.clone(),
-            upstream_sse_events: vec![],
-            response_sse_events: vec![],
-        });
-        state.metrics.set_store_size(state.store.len());
+        let request_json = to_json_value("Responses request", &_req).map_err(&record_error)?;
+        let mapped_request_json =
+            to_json_value("mapped Chat request", &chat_req).map_err(&record_error)?;
+        let created_at = chrono::Utc::now().timestamp();
+        persist_response_state(
+            &state,
+            ResponseState {
+                conversation_id: None,
+                id: mapped.response_id.clone(),
+                model: resolved_model.clone(),
+                created_at,
+                status: "failed".into(),
+                response_json: serde_json::Value::Null,
+                previous_response_id: _req.previous_response_id.clone(),
+                canonical_messages: chat_req.messages.clone(),
+            },
+            DebugArtifact {
+                conversation_id: None,
+                id: mapped.response_id.clone(),
+                model: resolved_model,
+                created_at,
+                status: "failed".into(),
+                upstream_error: Some(serde_json::json!({
+                    "status": status,
+                    "body": upstream_error,
+                })),
+                debug_annotations: debug_annotations_for_request(&request_json),
+                request_json,
+                mapped_request_json,
+                upstream_sse_events: vec![],
+                response_sse_events: vec![],
+            },
+        )
+        .map_err(&record_error)?;
         return Err(record_error(mapper::error_mapper::map_upstream_error(
             status, &body,
         )));
@@ -342,8 +375,9 @@ async fn handle_stream(
     // Capture what we need to save to store after streaming completes
     let store = state.store.clone();
     let metrics = state.metrics.clone();
-    let req_json = serde_json::to_value(&_req).unwrap_or_default();
+    let req_json = to_json_value("Responses request", &_req).map_err(&record_error)?;
     let sent_messages = chat_req.messages.clone();
+    let previous_response_id = _req.previous_response_id.clone();
 
     // Spawn task to read upstream SSE and convert to Response events
     tokio::spawn(async move {
@@ -380,10 +414,29 @@ async fn handle_stream(
                         for event in &events {
                             // Capture the completed response JSON for store
                             if let ResponseSseEvent::ResponseCompleted { response } = event {
-                                response_body = serde_json::to_value(response).unwrap_or_default();
+                                response_body =
+                                    match to_json_value("completed SSE response", response) {
+                                        Ok(value) => value,
+                                        Err(error) => {
+                                            let _ = tx
+                                                .send(Ok(ResponseSseEvent::Error {
+                                                    error: error.error,
+                                                }))
+                                                .await;
+                                            return;
+                                        }
+                                    };
                             }
-                            response_sse_events
-                                .push(serde_json::to_value(event).unwrap_or_default());
+                            let event_json = match sse_event_to_value(event) {
+                                Ok(value) => value,
+                                Err(error) => {
+                                    let _ = tx
+                                        .send(Ok(ResponseSseEvent::Error { error: error.error }))
+                                        .await;
+                                    return;
+                                }
+                            };
+                            response_sse_events.push(event_json);
                         }
                         final_events = Some(events);
                         break;
@@ -406,8 +459,18 @@ async fn handle_stream(
                             match stream_state.process_chunk(&chunk) {
                                 Ok(events) => {
                                     for event in events {
-                                        response_sse_events
-                                            .push(serde_json::to_value(&event).unwrap_or_default());
+                                        let event_json = match sse_event_to_value(&event) {
+                                            Ok(value) => value,
+                                            Err(error) => {
+                                                let _ = tx
+                                                    .send(Ok(ResponseSseEvent::Error {
+                                                        error: error.error,
+                                                    }))
+                                                    .await;
+                                                return;
+                                            }
+                                        };
+                                        response_sse_events.push(event_json);
                                         if tx.send(Ok(event)).await.is_err() {
                                             return;
                                         }
@@ -415,8 +478,18 @@ async fn handle_stream(
                                 }
                                 Err(e) => {
                                     let event = ResponseSseEvent::Error { error: e.error };
-                                    response_sse_events
-                                        .push(serde_json::to_value(&event).unwrap_or_default());
+                                    let event_json = match sse_event_to_value(&event) {
+                                        Ok(value) => value,
+                                        Err(error) => {
+                                            let _ = tx
+                                                .send(Ok(ResponseSseEvent::Error {
+                                                    error: error.error,
+                                                }))
+                                                .await;
+                                            return;
+                                        }
+                                    };
+                                    response_sse_events.push(event_json);
                                     let _ = tx.send(Ok(event)).await;
                                     return;
                                 }
@@ -431,7 +504,16 @@ async fn handle_stream(
                     let event = ResponseSseEvent::Error {
                         error: ApiError::stream_interrupted().error,
                     };
-                    response_sse_events.push(serde_json::to_value(&event).unwrap_or_default());
+                    let event_json = match sse_event_to_value(&event) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            let _ = tx
+                                .send(Ok(ResponseSseEvent::Error { error: error.error }))
+                                .await;
+                            return;
+                        }
+                    };
+                    response_sse_events.push(event_json);
                     let _ = tx.send(Ok(event)).await;
                     return;
                 }
@@ -483,22 +565,60 @@ async fn handle_stream(
         let debug_annotations = debug_annotations_for_request(&req_json);
 
         // Save to store for previous_response_id support
-        store.put(StoredResponse {
+        let mapped_request_json = match serde_json::to_value(&chat_req) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::error!(%error, "Failed to serialize mapped Chat request");
+                let _ = tx
+                    .send(Ok(ResponseSseEvent::Error {
+                        error: ApiError::internal(format!(
+                            "failed to serialize mapped Chat request: {error}"
+                        ))
+                        .error,
+                    }))
+                    .await;
+                return;
+            }
+        };
+        if let Err(error) = store.put_response_state(ResponseState {
+            conversation_id: None,
+            id: response_id.clone(),
+            model: model.clone(),
+            created_at,
+            status: "completed".into(),
+            response_json: response_body,
+            previous_response_id,
+            canonical_messages: canonical,
+        }) {
+            tracing::error!(%error, "Failed to persist streamed response state");
+            let _ = tx
+                .send(Ok(ResponseSseEvent::Error {
+                    error: ApiError::internal(format!(
+                        "failed to persist streamed response state: {error}"
+                    ))
+                    .error,
+                }))
+                .await;
+            return;
+        }
+        if let Err(error) = store.put_debug_artifact(DebugArtifact {
             conversation_id: None,
             id: response_id.clone(),
             model,
             created_at,
             status: "completed".into(),
             request_json: req_json,
-            mapped_request_json: serde_json::to_value(&chat_req).unwrap_or_default(),
-            response_json: response_body,
+            mapped_request_json,
             upstream_error: None,
             debug_annotations,
-            canonical_messages: canonical,
             upstream_sse_events,
             response_sse_events,
-        });
-        metrics.set_store_size(store.len());
+        }) {
+            tracing::error!(%error, "Failed to persist streamed debug artifact");
+        }
+        if let Ok(size) = store.len() {
+            metrics.set_store_size(size);
+        }
         metrics.record_request_completed(stream_state.final_usage());
 
         if let Some(events) = final_events {
@@ -519,19 +639,25 @@ pub async fn get_response(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
-    match state.store.get(&id) {
-        Some(record) => Ok(Json(record.response_json)),
-        None => Err(to_status_json(&ApiError::response_not_found(&id))),
+    match state.store.get_response_json(&id) {
+        Ok(Some(response_json)) => Ok(Json(response_json)),
+        Ok(None) => Err(to_status_json(&ApiError::response_not_found(&id))),
+        Err(error) => Err(to_status_json(&state_store_error(error))),
     }
 }
 
 pub async fn get_response_debug(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
-) -> Result<Json<StoredResponse>, (axum::http::StatusCode, Json<serde_json::Value>)> {
-    match state.store.get(&id) {
-        Some(record) => Ok(Json(record)),
-        None => Err(to_status_json(&ApiError::response_not_found(&id))),
+) -> Result<Json<DebugArtifactView>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    match state.store.get_debug_artifact(&id) {
+        Ok(Some(artifact)) => Ok(Json(artifact)),
+        Ok(None) => match state.store.get_response_json(&id) {
+            Ok(Some(_)) => Err(to_status_json(&ApiError::debug_artifact_expired(&id))),
+            Ok(None) => Err(to_status_json(&ApiError::response_not_found(&id))),
+            Err(error) => Err(to_status_json(&state_store_error(error))),
+        },
+        Err(error) => Err(to_status_json(&state_store_error(error))),
     }
 }
 
@@ -543,20 +669,30 @@ pub struct DebugResponsesQuery {
 pub async fn list_responses_debug(
     State(state): State<AppState>,
     Query(query): Query<DebugResponsesQuery>,
-) -> Json<Vec<StoredResponse>> {
+) -> Result<Json<Vec<DebugArtifactView>>, (axum::http::StatusCode, Json<serde_json::Value>)> {
     let limit = query.limit.unwrap_or(20).clamp(1, 200);
-    Json(state.store.list_recent(limit))
+    state
+        .store
+        .list_debug_artifacts(limit)
+        .map(Json)
+        .map_err(|error| to_status_json(&state_store_error(error)))
 }
 
 pub async fn delete_response(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
-    if state.store.delete(&id) {
-        state.metrics.set_store_size(state.store.len());
-        Ok(Json(serde_json::json!({"id": id, "deleted": true})))
-    } else {
-        Err(to_status_json(&ApiError::response_not_found(&id)))
+    match state.store.delete(&id) {
+        Ok(true) => {
+            let size = state
+                .store
+                .len()
+                .map_err(|error| to_status_json(&state_store_error(error)))?;
+            state.metrics.set_store_size(size);
+            Ok(Json(serde_json::json!({"id": id, "deleted": true})))
+        }
+        Ok(false) => Err(to_status_json(&ApiError::response_not_found(&id))),
+        Err(error) => Err(to_status_json(&state_store_error(error))),
     }
 }
 
@@ -571,6 +707,7 @@ fn to_status_json(e: &ApiError) -> (axum::http::StatusCode, Json<serde_json::Val
         "stream_interrupted" => StatusCode::BAD_GATEWAY,
         "invalid_request_error" => match e.error.code.as_deref() {
             Some("response_not_found") => StatusCode::NOT_FOUND,
+            Some("debug_artifact_expired") => StatusCode::GONE,
             _ => StatusCode::BAD_REQUEST,
         },
         "upstream_error" | "internal_error" => StatusCode::BAD_GATEWAY,
@@ -579,11 +716,52 @@ fn to_status_json(e: &ApiError) -> (axum::http::StatusCode, Json<serde_json::Val
     (status, Json(serde_json::to_value(e).unwrap_or_default()))
 }
 
-/// Build a map of tool_call_id → reasoning_content from all stored responses.
-fn build_reasoning_map(
-    store: &crate::store::ResponseStore,
-) -> std::collections::HashMap<String, String> {
-    store.build_reasoning_map("default")
+fn missing_reasoning_call_ids(messages: &[protocol::chat::ChatMessage]) -> Vec<String> {
+    let mut call_ids = Vec::new();
+    for msg in messages {
+        if let protocol::chat::ChatMessage::Assistant {
+            reasoning_content: None,
+            tool_calls: Some(tool_calls),
+            ..
+        } = msg
+        {
+            call_ids.extend(tool_calls.iter().map(|tool_call| tool_call.id.clone()));
+        }
+    }
+    call_ids.sort();
+    call_ids.dedup();
+    call_ids
+}
+
+fn state_store_error(error: anyhow::Error) -> ApiError {
+    ApiError::internal(format!("state store error: {error}"))
+}
+
+fn to_json_value<T: Serialize>(label: &str, value: &T) -> Result<serde_json::Value, ApiError> {
+    serde_json::to_value(value)
+        .map_err(|error| ApiError::internal(format!("failed to serialize {label}: {error}")))
+}
+
+fn sse_event_to_value(event: &ResponseSseEvent) -> Result<serde_json::Value, ApiError> {
+    to_json_value("Responses SSE event", event)
+}
+
+fn persist_response_state(
+    state: &AppState,
+    response_state: ResponseState,
+    debug_artifact: DebugArtifact,
+) -> Result<(), ApiError> {
+    state
+        .store
+        .put_response_state(response_state)
+        .map_err(state_store_error)?;
+    state
+        .store
+        .put_debug_artifact(debug_artifact)
+        .map_err(state_store_error)?;
+    let size = state.store.len().map_err(state_store_error)?;
+    state.metrics.set_store_size(size);
+    Ok(())
 }
 
 fn debug_annotations_for_request(request: &serde_json::Value) -> Vec<String> {
@@ -647,13 +825,14 @@ async fn handle_native_responses(
     if !state.profile.upstream_stateful()
         && let Some(ref prev_id) = canonical.previous_response_id
     {
-        let history = state
+        let history_messages = state
             .store
-            .get(prev_id)
+            .get_canonical_messages(prev_id)
+            .map_err(|error| record_error(state_store_error(error)))?
             .ok_or_else(|| record_error(ApiError::response_not_found(prev_id)))?;
         let mut input = body["input"].as_array().cloned().unwrap_or_default();
         // Prepend history messages as user/assistant messages
-        for msg in history.canonical_messages.iter().rev() {
+        for msg in history_messages.iter().rev() {
             let value = chat_message_to_responses_input(msg);
             input.insert(0, value);
         }
@@ -677,27 +856,39 @@ async fn handle_native_responses(
         let err_body = upstream_resp.text().await.unwrap_or_default();
         let upstream_error = serde_json::from_str::<serde_json::Value>(&err_body)
             .unwrap_or_else(|_| serde_json::json!({ "body": err_body.clone() }));
-        state.store.put(StoredResponse {
-            conversation_id: None,
-            id: format!("resp_{}", uuid::Uuid::new_v4()),
-            model: resolved_model,
-            created_at: chrono::Utc::now().timestamp(),
-            status: "failed".into(),
-            request_json: serde_json::to_value(&canonical).unwrap_or_default(),
-            mapped_request_json: body.clone(),
-            response_json: serde_json::Value::Null,
-            upstream_error: Some(serde_json::json!({
-                "status": status,
-                "body": upstream_error,
-            })),
-            debug_annotations: debug_annotations_for_request(
-                &serde_json::to_value(&canonical).unwrap_or_default(),
-            ),
-            canonical_messages: canonical.clone().into_canonical_messages(),
-            upstream_sse_events: vec![],
-            response_sse_events: vec![],
-        });
-        state.metrics.set_store_size(state.store.len());
+        let request_json = to_json_value("canonical request", &canonical).map_err(&record_error)?;
+        let response_id = format!("resp_{}", uuid::Uuid::new_v4());
+        let created_at = chrono::Utc::now().timestamp();
+        persist_response_state(
+            &state,
+            ResponseState {
+                conversation_id: None,
+                id: response_id.clone(),
+                model: resolved_model.clone(),
+                created_at,
+                status: "failed".into(),
+                response_json: serde_json::Value::Null,
+                previous_response_id: canonical.previous_response_id.clone(),
+                canonical_messages: canonical.clone().into_canonical_messages(),
+            },
+            DebugArtifact {
+                conversation_id: None,
+                id: response_id,
+                model: resolved_model,
+                created_at,
+                status: "failed".into(),
+                request_json: request_json.clone(),
+                mapped_request_json: body.clone(),
+                upstream_error: Some(serde_json::json!({
+                    "status": status,
+                    "body": upstream_error,
+                })),
+                debug_annotations: debug_annotations_for_request(&request_json),
+                upstream_sse_events: vec![],
+                response_sse_events: vec![],
+            },
+        )
+        .map_err(&record_error)?;
         return Err(record_error(mapper::error_mapper::map_upstream_error(
             status, &err_body,
         )));
@@ -711,7 +902,8 @@ async fn handle_native_responses(
         >(64);
         let store = state.store.clone();
         let metrics = state.metrics.clone();
-        let req_json = serde_json::to_value(&canonical).unwrap_or_default();
+        let req_json = to_json_value("canonical request", &canonical).map_err(&record_error)?;
+        let previous_response_id = canonical.previous_response_id.clone();
         let resolved = resolved_model.clone();
 
         tokio::spawn(async move {
@@ -776,9 +968,38 @@ async fn handle_native_responses(
             };
             let debug_annotations = debug_annotations_for_request(&req_json);
 
-            store.put(StoredResponse {
+            let mapped_request_json = body.clone();
+            if let Err(error) = store.put_response_state(ResponseState {
                 conversation_id: None,
-                id: store_id,
+                id: store_id.clone(),
+                model: resolved.clone(),
+                created_at: response_body
+                    .get("created_at")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp()),
+                status: response_body
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("completed")
+                    .into(),
+                response_json: response_body.clone(),
+                previous_response_id,
+                canonical_messages: canonical_msgs_for_store,
+            }) {
+                tracing::error!(%error, "Failed to persist native streamed response state");
+                let _ = tx
+                    .send(Ok(protocol::sse::ResponseSseEvent::Error {
+                        error: ApiError::internal(format!(
+                            "failed to persist native streamed response state: {error}"
+                        ))
+                        .error,
+                    }))
+                    .await;
+                return;
+            }
+            if let Err(error) = store.put_debug_artifact(DebugArtifact {
+                conversation_id: None,
+                id: store_id.clone(),
                 model: resolved,
                 created_at: response_body
                     .get("created_at")
@@ -790,15 +1011,17 @@ async fn handle_native_responses(
                     .unwrap_or("completed")
                     .into(),
                 request_json: req_json,
-                mapped_request_json: serde_json::to_value(&body).unwrap_or_default(),
-                response_json: response_body.clone(),
+                mapped_request_json,
                 upstream_error: None,
                 debug_annotations,
-                canonical_messages: canonical_msgs_for_store,
                 upstream_sse_events,
                 response_sse_events,
-            });
-            metrics.set_store_size(store.len());
+            }) {
+                tracing::error!(%error, "Failed to persist native streamed debug artifact");
+            }
+            if let Ok(size) = store.len() {
+                metrics.set_store_size(size);
+            }
             let usage = serde_json::from_value::<protocol::common::Usage>(
                 response_body.get("usage").cloned().unwrap_or_default(),
             )
@@ -834,27 +1057,40 @@ async fn handle_native_responses(
             &response_body,
         );
 
-        state.store.put(StoredResponse {
-            conversation_id: None,
-            id: response_id.clone(),
-            model: resolved_model,
-            created_at,
-            status: response_body["status"]
-                .as_str()
-                .unwrap_or("completed")
-                .into(),
-            request_json: serde_json::to_value(&canonical).unwrap_or_default(),
-            mapped_request_json: body.clone(),
-            response_json: response_body.clone(),
-            upstream_error: None,
-            debug_annotations: debug_annotations_for_request(
-                &serde_json::to_value(&canonical).unwrap_or_default(),
-            ),
-            canonical_messages: canonical_msgs,
-            upstream_sse_events: vec![],
-            response_sse_events: vec![],
-        });
-        state.metrics.set_store_size(state.store.len());
+        let request_json = to_json_value("canonical request", &canonical).map_err(&record_error)?;
+        persist_response_state(
+            &state,
+            ResponseState {
+                conversation_id: None,
+                id: response_id.clone(),
+                model: resolved_model.clone(),
+                created_at,
+                status: response_body["status"]
+                    .as_str()
+                    .unwrap_or("completed")
+                    .into(),
+                response_json: response_body.clone(),
+                previous_response_id: canonical.previous_response_id.clone(),
+                canonical_messages: canonical_msgs,
+            },
+            DebugArtifact {
+                conversation_id: None,
+                id: response_id.clone(),
+                model: resolved_model,
+                created_at,
+                status: response_body["status"]
+                    .as_str()
+                    .unwrap_or("completed")
+                    .into(),
+                request_json: request_json.clone(),
+                mapped_request_json: body.clone(),
+                upstream_error: None,
+                debug_annotations: debug_annotations_for_request(&request_json),
+                upstream_sse_events: vec![],
+                response_sse_events: vec![],
+            },
+        )
+        .map_err(&record_error)?;
         let usage =
             serde_json::from_value::<protocol::common::Usage>(response_body["usage"].clone()).ok();
         state.metrics.record_request_completed(usage.as_ref());

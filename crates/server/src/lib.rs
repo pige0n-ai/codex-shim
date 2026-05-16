@@ -38,7 +38,10 @@ pub fn app_with_metrics(config: Config, metrics: Arc<RuntimeMetrics>) -> anyhow:
     config.validate()?;
     let store_backend: Box<dyn crate::store::ResponseStoreBackend> =
         match config.state.backend.as_str() {
-            "memory" | "ram" => Box::new(crate::store::MemoryStore::new(config.state.ttl_seconds)),
+            "memory" | "ram" => Box::new(crate::store::MemoryStore::new(
+                config.state.ttl_seconds,
+                config.state.debug_artifact_ttl_seconds,
+            )),
             #[cfg(feature = "sqlite")]
             "sqlite" => {
                 let db_path = config
@@ -52,8 +55,12 @@ pub fn app_with_metrics(config: Config, metrics: Arc<RuntimeMetrics>) -> anyhow:
                         .expect("Failed to create SQLite state directory");
                 }
                 Box::new(
-                    crate::store::SqliteStore::new(&db_path, config.state.ttl_seconds)
-                        .expect("Failed to open SQLite store"),
+                    crate::store::SqliteStore::new(
+                        &db_path,
+                        config.state.ttl_seconds,
+                        config.state.debug_artifact_ttl_seconds,
+                    )
+                    .expect("Failed to open SQLite store"),
                 )
             }
             #[cfg(not(feature = "sqlite"))]
@@ -65,7 +72,7 @@ pub fn app_with_metrics(config: Config, metrics: Arc<RuntimeMetrics>) -> anyhow:
                 other
             ),
         };
-    let store = Arc::new(ResponseStore::new(store_backend, config.state.ttl_seconds));
+    let store = Arc::new(ResponseStore::new(store_backend));
     let upstream = Arc::new(UpstreamClient::new(config.upstream.clone())?);
     let profile: Arc<dyn ProviderProfile> = {
         use crate::provider_profile_config::ProviderProfileConfig;
@@ -89,15 +96,23 @@ pub fn app_with_metrics(config: Config, metrics: Arc<RuntimeMetrics>) -> anyhow:
         let mut interval = tokio::time::interval(Duration::from_secs(cleanup_interval));
         loop {
             interval.tick().await;
-            let removed = cleanup_store.cleanup_expired();
-            cleanup_metrics.set_store_size(cleanup_store.len());
-            if removed > 0 {
-                tracing::info!(removed, "Cleaned up expired responses");
+            match cleanup_store.cleanup_expired() {
+                Ok(removed) => {
+                    if let Ok(size) = cleanup_store.len() {
+                        cleanup_metrics.set_store_size(size);
+                    }
+                    if removed > 0 {
+                        tracing::info!(removed, "Cleaned up expired responses/debug artifacts");
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(%error, "Failed to clean up expired response state");
+                }
             }
         }
     });
 
-    metrics.set_store_size(store.len());
+    metrics.set_store_size(store.len()?);
 
     let state = AppState {
         config: Arc::new(config),
