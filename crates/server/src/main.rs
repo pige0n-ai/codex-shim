@@ -1279,6 +1279,7 @@ models:
 
 state:
   backend: memory
+  debug_artifact_ttl_seconds: 600
 
 logging:
   level: info
@@ -1410,6 +1411,7 @@ models:
 
 state:
   backend: memory
+  debug_artifact_ttl_seconds: 600
 
 logging:
   level: info

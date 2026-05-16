@@ -135,6 +135,15 @@ impl ApiError {
         )
     }
 
+    pub fn debug_artifact_expired(id: &str) -> Self {
+        Self::with_param(
+            format!("Debug artifact for response {id} has expired"),
+            "invalid_request_error",
+            "response_id",
+            "debug_artifact_expired",
+        )
+    }
+
     pub fn upstream_auth_error(details: impl Into<String>) -> Self {
         Self::new(details, "upstream_auth_error")
     }

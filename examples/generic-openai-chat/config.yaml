@@ -48,6 +48,7 @@ models:
 state:
   backend: memory              # memory | sqlite
   ttl_seconds: 86400
+  debug_artifact_ttl_seconds: 600
   cleanup_interval_seconds: 3600
   # sqlite_path: "~/.codex-shim/store.db"
 

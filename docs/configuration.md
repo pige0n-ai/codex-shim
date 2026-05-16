@@ -150,6 +150,8 @@ send empty base instructions for that model.
 ```yaml
 state:
   backend: memory             # memory/ram, or sqlite when the binary has sqlite support
+  ttl_seconds: 86400          # runtime response state for continuation
+  debug_artifact_ttl_seconds: 600  # raw debug artifacts; defaults to 10 minutes
   sqlite_path: ~/.codex-shim/store.db  # optional; used only with backend: sqlite
 
 logging:
@@ -157,6 +159,9 @@ logging:
 ```
 
 Defaults work for most setups.
+For long benchmark runs, prefer `backend: sqlite`; raw request/SSE debug artifacts
+are kept separately from continuation state and expire after
+`debug_artifact_ttl_seconds`.
 
 ## Validation
 
