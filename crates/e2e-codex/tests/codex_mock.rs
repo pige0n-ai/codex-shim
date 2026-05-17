@@ -11,6 +11,7 @@ use e2e_codex::{
     ShimProcess, generate_codex_home, generate_codex_home_project_trust_only, generate_shim_config,
     generate_shim_config_native, run_codex_exec, write_project_codex_config,
 };
+use protocol::models::{CatalogModelSpec, build_model_catalog};
 use serde_json::Value;
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -66,6 +67,30 @@ fn last_chat_request(requests: &[CapturedRequest]) -> &Value {
         .body
 }
 
+fn system_message_texts(body: &Value) -> Vec<String> {
+    body["messages"]
+        .as_array()
+        .expect("chat request should include messages")
+        .iter()
+        .filter(|message| message["role"] == "system")
+        .map(|message| chat_content_text(&message["content"]))
+        .collect()
+}
+
+fn chat_content_text(content: &Value) -> String {
+    if let Some(text) = content.as_str() {
+        return text.to_string();
+    }
+    if let Some(parts) = content.as_array() {
+        return parts
+            .iter()
+            .filter_map(|part| part["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    content.to_string()
+}
+
 fn assistant_tool_call_index(messages: &[Value], call_id: &str) -> usize {
     messages
         .iter()
@@ -100,6 +125,57 @@ fn exec_command_tool() -> Value {
             "required": ["cmd"]
         }
     })
+}
+
+fn codex_home_with_base_instructions(
+    base: &std::path::Path,
+    shim_url: &str,
+    model: &str,
+    base_instructions: &str,
+) -> anyhow::Result<std::path::PathBuf> {
+    let caps = protocol::provider_caps::ProviderCapabilities {
+        supports_function_tools: true,
+        supports_parallel_tool_calls: true,
+        supports_reasoning_effort: false,
+        ..Default::default()
+    };
+    let catalog = serde_json::to_value(build_model_catalog(
+        &[CatalogModelSpec {
+            slug: model.to_string(),
+            display_name: Some(model.to_string()),
+            description: None,
+            context_window: 131072,
+            tool_calling: Some(true),
+            vision: Some(false),
+            reasoning_levels: Some(vec![]),
+            priority: Some(10),
+            base_instructions: Some(base_instructions.to_string()),
+            auto_compact_token_limit: None,
+            supports_search_tool: Some(false),
+            supports_reasoning_summaries: Some(false),
+            apply_patch_tool_type: None,
+            supports_image_detail_original: Some(false),
+        }],
+        &caps,
+    ))?;
+    e2e_codex::generate_codex_home_with_provider(
+        base,
+        "local-shim",
+        &format!(
+            r#"[model_providers.local-shim]
+name = "codex-shim"
+base_url = "{shim_url}"
+env_key = "LOCAL_SHIM_TOKEN"
+wire_api = "responses"
+supports_websockets = false
+request_max_retries = 0
+stream_max_retries = 0
+stream_idle_timeout_ms = 120000
+"#
+        ),
+        model,
+        &catalog,
+    )
 }
 
 // ── A. Codex subprocess smoke ────────────────────────────────────
@@ -147,6 +223,39 @@ async fn codex_mock_chat_stream_basic() {
             event_types
         );
     }
+}
+
+#[tokio::test]
+#[ignore = "requires codex binary"]
+async fn codex_mock_model_base_instructions_reach_upstream_system_prompt() {
+    let sentinel = "BASE_INSTRUCTIONS_SENTINEL_9b0a8f";
+    let (mock, shim, tmp, workdir) = setup("deepseek-chat", "mock-model").await.expect("setup");
+    let codex_home =
+        codex_home_with_base_instructions(tmp.path(), &shim.base_url(), "mock-model", sentinel)
+            .expect("codex home with base instructions");
+
+    let result = run_codex_exec(&codex_home, workdir.path(), "Reply with OK.", &[])
+        .await
+        .expect("codex exec");
+
+    drop(shim);
+    let requests = mock.state.take_requests();
+    let chat_body = last_chat_request(&requests);
+    let system_texts = system_message_texts(chat_body);
+
+    drop(mock);
+
+    assert!(
+        result.status.success(),
+        "codex exit code should be 0, got {:?}\n--- stderr ---\n{}\n--- end stderr ---",
+        result.status.code(),
+        result.stderr,
+    );
+    assert!(
+        system_texts.iter().any(|text| text.contains(sentinel)),
+        "expected base_instructions sentinel in upstream system messages: {system_texts:#?}\n\
+         upstream body: {chat_body:#?}",
+    );
 }
 
 // ── B. Request headers / query / auth assertions ─────────────────
@@ -310,6 +419,41 @@ async fn direct_request_builder_headers_query_auth() {
         Some(&"e2e-test".to_string())
     );
 
+    drop(mock);
+}
+
+#[tokio::test]
+async fn direct_instructions_reach_upstream_system_prompt() {
+    let (mock, shim, _tmp, _workdir) = setup("deepseek-chat", "mock-model").await.expect("setup");
+    let client = reqwest::Client::new();
+    let sentinel = "DIRECT_INSTRUCTIONS_SENTINEL_4c6502";
+
+    let resp = client
+        .post(format!("{}/responses", shim.base_url()))
+        .bearer_auth("local-shim-test-token")
+        .json(&serde_json::json!({
+            "model": "mock-model",
+            "instructions": sentinel,
+            "input": "hi",
+            "stream": true
+        }))
+        .send()
+        .await
+        .expect("request");
+
+    assert!(resp.status().is_success());
+    let _body = resp.text().await.unwrap();
+
+    drop(shim);
+    let requests = mock.state.take_requests();
+    let chat_body = last_chat_request(&requests);
+    let system_texts = system_message_texts(chat_body);
+
+    assert!(
+        system_texts.iter().any(|text| text.contains(sentinel)),
+        "expected instructions sentinel in upstream system messages: {system_texts:#?}\n\
+         upstream body: {chat_body:#?}",
+    );
     drop(mock);
 }
 

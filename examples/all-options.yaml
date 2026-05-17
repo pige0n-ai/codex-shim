@@ -108,6 +108,15 @@ provider:
       # Add arbitrary extra JSON fields here if a provider needs them.
       # top_k: 50
 
+sampling:
+  # Optional OpenAI-compatible sampling defaults for upstream /chat/completions.
+  # Null means the field is omitted unless Codex sends it in the request.
+  # Common compatible ranges:
+  #   temperature: 0.0..2.0
+  #   top_p: 0.0..1.0
+  temperature: null
+  top_p: null
+
 models:
   # models.default is the shim's default model slug.
   # Keep this in sync with:
