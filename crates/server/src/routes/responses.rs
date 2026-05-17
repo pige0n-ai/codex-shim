@@ -6,6 +6,7 @@ use axum::{
 use futures::StreamExt;
 use mapper::MappingConfig;
 use protocol::canonical::CanonicalRequest;
+use protocol::chat::ChatCompletionRequest;
 use protocol::error::ApiError;
 use protocol::responses::ResponsesCreateRequest;
 use protocol::sse::ResponseSseEvent;
@@ -13,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::AppState;
+use crate::config::SamplingConfig;
 use crate::sse_writer;
 use crate::store::{DebugArtifact, DebugArtifactView, ResponseState};
 
@@ -215,8 +217,9 @@ async fn handle_non_stream(
         metrics.record_request_error(e.error.message.clone());
         to_status_json(&e)
     };
-    // Apply provider-specific normalization before sending
+    // Apply config-level defaults before provider-specific normalization.
     let mut chat_req = mapped.chat_request.clone();
+    apply_sampling_config(&mut chat_req, &state.config.sampling);
     let eb = state.profile.extra_body();
     if !eb.is_empty() {
         eb.merge_into(&mut chat_req.extra_body);
@@ -293,8 +296,9 @@ async fn handle_stream(
         metrics.record_request_error(e.error.message.clone());
         to_status_json(&e)
     };
-    // Apply provider-specific normalization before sending
+    // Apply config-level defaults before provider-specific normalization.
     let mut chat_req = mapped.chat_request.clone();
+    apply_sampling_config(&mut chat_req, &state.config.sampling);
     let eb = state.profile.extra_body();
     if !eb.is_empty() {
         eb.merge_into(&mut chat_req.extra_body);
@@ -744,6 +748,15 @@ fn to_json_value<T: Serialize>(label: &str, value: &T) -> Result<serde_json::Val
 
 fn sse_event_to_value(event: &ResponseSseEvent) -> Result<serde_json::Value, ApiError> {
     to_json_value("Responses SSE event", event)
+}
+
+fn apply_sampling_config(chat_req: &mut ChatCompletionRequest, sampling: &SamplingConfig) {
+    if chat_req.temperature.is_none() {
+        chat_req.temperature = sampling.temperature;
+    }
+    if chat_req.top_p.is_none() {
+        chat_req.top_p = sampling.top_p;
+    }
 }
 
 fn persist_response_state(
@@ -1458,6 +1471,31 @@ fn validate_content_part(part: &Value, path: &str) -> Result<(), ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::chat::{ChatContent, ChatMessage};
+
+    fn chat_request() -> ChatCompletionRequest {
+        ChatCompletionRequest {
+            model: "model".into(),
+            messages: vec![ChatMessage::User {
+                content: ChatContent::Text("hello".into()),
+                name: None,
+            }],
+            stream: None,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            presence_penalty: None,
+            frequency_penalty: None,
+            stop: None,
+            tools: None,
+            tool_choice: None,
+            parallel_tool_calls: None,
+            response_format: None,
+            reasoning_effort: None,
+            thinking: None,
+            extra_body: serde_json::json!({}),
+        }
+    }
 
     #[test]
     fn debug_annotations_mark_duplicate_input_messages_without_rewriting() {
@@ -1474,5 +1512,35 @@ mod tests {
         assert_eq!(annotations.len(), 1);
         assert!(annotations[0].contains("indexes 0 and 2"));
         assert_eq!(request["input"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn apply_sampling_config_fills_empty_sampling_fields() {
+        let mut req = chat_request();
+        let sampling = SamplingConfig {
+            temperature: Some(0.2),
+            top_p: Some(0.8),
+        };
+
+        apply_sampling_config(&mut req, &sampling);
+
+        assert_eq!(req.temperature, Some(0.2));
+        assert_eq!(req.top_p, Some(0.8));
+    }
+
+    #[test]
+    fn apply_sampling_config_preserves_request_sampling_fields() {
+        let mut req = chat_request();
+        req.temperature = Some(0.7);
+        req.top_p = Some(0.9);
+        let sampling = SamplingConfig {
+            temperature: Some(0.2),
+            top_p: Some(0.8),
+        };
+
+        apply_sampling_config(&mut req, &sampling);
+
+        assert_eq!(req.temperature, Some(0.7));
+        assert_eq!(req.top_p, Some(0.9));
     }
 }

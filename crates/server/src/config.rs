@@ -139,6 +139,8 @@ pub struct Config {
     #[serde(default)]
     pub reasoning: ReasoningSettings,
     #[serde(default)]
+    pub sampling: SamplingConfig,
+    #[serde(default)]
     pub state: StateConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -273,6 +275,14 @@ pub struct ReasoningSettings {
     pub expose_reasoning_to_client: bool,
     #[serde(default = "default_true")]
     pub persist_reasoning_for_tool_calls: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SamplingConfig {
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub top_p: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -625,6 +635,8 @@ impl Config {
         if self.state.debug_artifact_ttl_seconds == 0 {
             anyhow::bail!("state.debug_artifact_ttl_seconds must be greater than 0");
         }
+        validate_optional_range("sampling.temperature", self.sampling.temperature, 0.0, 2.0)?;
+        validate_optional_range("sampling.top_p", self.sampling.top_p, 0.0, 1.0)?;
         #[cfg(not(feature = "sqlite"))]
         if self.state.backend == "sqlite" {
             anyhow::bail!(
@@ -663,6 +675,21 @@ impl Config {
         }
         Ok(())
     }
+}
+
+fn validate_optional_range(
+    field: &str,
+    value: Option<f32>,
+    min: f32,
+    max: f32,
+) -> anyhow::Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if !value.is_finite() || value < min || value > max {
+        anyhow::bail!("{field} must be between {min} and {max}, got {value}");
+    }
+    Ok(())
 }
 
 pub(crate) fn home_dir() -> Option<PathBuf> {
@@ -798,6 +825,30 @@ mod tests {
         config.models.catalog[0].slug = "other-model".into();
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("models.default resolves to"));
+    }
+
+    #[test]
+    fn validate_accepts_sampling_bounds() {
+        let mut config = valid_config();
+        config.sampling.temperature = Some(2.0);
+        config.sampling.top_p = Some(1.0);
+        config.validate().expect("sampling bounds should validate");
+    }
+
+    #[test]
+    fn validate_rejects_temperature_out_of_range() {
+        let mut config = valid_config();
+        config.sampling.temperature = Some(2.1);
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("sampling.temperature must be between 0 and 2"));
+    }
+
+    #[test]
+    fn validate_rejects_top_p_out_of_range() {
+        let mut config = valid_config();
+        config.sampling.top_p = Some(1.1);
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("sampling.top_p must be between 0 and 1"));
     }
 
     #[test]

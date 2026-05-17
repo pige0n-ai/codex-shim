@@ -25,8 +25,8 @@ models:
 ```
 
 `provider.kind` picks from [27 built-in profiles](provider-compatibility.md).
-All other fields (`server.listen`, `reasoning.*`, `state.*`, `logging.*`) use
-sensible defaults from the chosen profile.
+All other fields (`server.listen`, `reasoning.*`, `sampling.*`, `state.*`,
+`logging.*`) use sensible defaults from the chosen profile.
 
 Validate and install:
 
@@ -144,6 +144,20 @@ model catalog now includes a small Codex coding-agent default so custom upstream
 models receive a self-definition and basic tool-use guidance. Set
 `base_instructions: ""` explicitly only when you intentionally want Codex to
 send empty base instructions for that model.
+
+## Sampling
+
+```yaml
+sampling:
+  temperature: null  # omit when unset; valid range 0.0..2.0
+  top_p: null        # omit when unset; valid range 0.0..1.0
+```
+
+These are optional defaults for upstream `/chat/completions` requests. If Codex
+already sends `temperature` or `top_p`, that request value is preserved. If the
+config field is `null` or omitted, codex-shim leaves it out of the upstream
+request body. Provider-specific `pre_send` rules still run last, so profiles
+that must remove sampling while reasoning/thinking is enabled continue to do so.
 
 ## Other Blocks
 
