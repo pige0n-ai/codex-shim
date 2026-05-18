@@ -6,7 +6,7 @@ use axum::{
 use futures::StreamExt;
 use mapper::MappingConfig;
 use protocol::canonical::CanonicalRequest;
-use protocol::chat::ChatCompletionRequest;
+use protocol::chat::{ChatCompletionRequest, ThinkingConfig};
 use protocol::error::ApiError;
 use protocol::responses::ResponsesCreateRequest;
 use protocol::sse::ResponseSseEvent;
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::AppState;
-use crate::config::SamplingConfig;
+use crate::config::{ReasoningSettings, SamplingConfig};
 use crate::sse_writer;
 use crate::store::{DebugArtifact, DebugArtifactView, ResponseState};
 
@@ -128,6 +128,11 @@ pub async fn create_response(
             .map_err(|e| to_status_json(&e))?;
 
             state.profile.map_reasoning(&mut mapped.chat_request, &req);
+            apply_reasoning_config_defaults(
+                &mut mapped.chat_request,
+                &state.config.reasoning,
+                state.profile.capabilities().reasoning_policy.clone(),
+            );
             mapped.chat_request.model = resolved_model.clone();
 
             // Reasoning recovery for multi-turn tool calls
@@ -780,6 +785,39 @@ fn apply_sampling_config(chat_req: &mut ChatCompletionRequest, sampling: &Sampli
     }
     if chat_req.top_p.is_none() {
         chat_req.top_p = sampling.top_p;
+    }
+}
+
+fn apply_reasoning_config_defaults(
+    chat_req: &mut ChatCompletionRequest,
+    reasoning: &ReasoningSettings,
+    policy: protocol::provider_caps::ReasoningPolicy,
+) {
+    if policy != protocol::provider_caps::ReasoningPolicy::DeepSeekReasoningContent
+        || chat_req.thinking.is_some()
+    {
+        return;
+    }
+
+    if reasoning.enabled {
+        chat_req.thinking = Some(ThinkingConfig {
+            thinking_type: "enabled".into(),
+        });
+        if chat_req.reasoning_effort.is_none() {
+            chat_req.reasoning_effort = Some(map_deepseek_effort(&reasoning.effort));
+        }
+    } else {
+        chat_req.thinking = Some(ThinkingConfig {
+            thinking_type: "disabled".into(),
+        });
+    }
+}
+
+fn map_deepseek_effort(effort: &str) -> String {
+    match effort {
+        "minimal" | "low" | "medium" | "high" => "high".into(),
+        "xhigh" => "max".into(),
+        other => other.to_string(),
     }
 }
 
@@ -1648,5 +1686,73 @@ mod tests {
 
         assert_eq!(err.error.param.as_deref(), Some("input[0].input"));
         assert_eq!(err.error.code.as_deref(), Some("invalid_custom_tool_input"));
+    }
+
+    #[test]
+    fn deepseek_reasoning_enabled_sets_typed_thinking_and_effort() {
+        let mut req = chat_request();
+        let reasoning = ReasoningSettings {
+            enabled: true,
+            effort: "xhigh".into(),
+            ..Default::default()
+        };
+
+        apply_reasoning_config_defaults(
+            &mut req,
+            &reasoning,
+            protocol::provider_caps::ReasoningPolicy::DeepSeekReasoningContent,
+        );
+
+        assert_eq!(
+            req.thinking.as_ref().map(|t| t.thinking_type.as_str()),
+            Some("enabled")
+        );
+        assert_eq!(req.reasoning_effort.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn deepseek_reasoning_disabled_sets_typed_disabled() {
+        let mut req = chat_request();
+        let reasoning = ReasoningSettings {
+            enabled: false,
+            ..Default::default()
+        };
+
+        apply_reasoning_config_defaults(
+            &mut req,
+            &reasoning,
+            protocol::provider_caps::ReasoningPolicy::DeepSeekReasoningContent,
+        );
+
+        assert_eq!(
+            req.thinking.as_ref().map(|t| t.thinking_type.as_str()),
+            Some("disabled")
+        );
+        assert_eq!(req.reasoning_effort, None);
+    }
+
+    #[test]
+    fn deepseek_reasoning_defaults_preserve_request_thinking() {
+        let mut req = chat_request();
+        req.thinking = Some(ThinkingConfig {
+            thinking_type: "enabled".into(),
+        });
+        req.reasoning_effort = Some("high".into());
+        let reasoning = ReasoningSettings {
+            enabled: false,
+            ..Default::default()
+        };
+
+        apply_reasoning_config_defaults(
+            &mut req,
+            &reasoning,
+            protocol::provider_caps::ReasoningPolicy::DeepSeekReasoningContent,
+        );
+
+        assert_eq!(
+            req.thinking.as_ref().map(|t| t.thinking_type.as_str()),
+            Some("enabled")
+        );
+        assert_eq!(req.reasoning_effort.as_deref(), Some("high"));
     }
 }

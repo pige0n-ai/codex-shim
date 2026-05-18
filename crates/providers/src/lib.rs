@@ -230,6 +230,14 @@ pub fn create_profile(
     profile_name: &str,
     override_caps: Option<ProviderCapabilities>,
 ) -> Box<dyn ProviderProfile> {
+    create_profile_with_extra_body(profile_name, override_caps, ExtraBody::default())
+}
+
+pub fn create_profile_with_extra_body(
+    profile_name: &str,
+    override_caps: Option<ProviderCapabilities>,
+    extra_body: ExtraBody,
+) -> Box<dyn ProviderProfile> {
     let mut caps =
         preset_capabilities(profile_name).unwrap_or_else(ProviderCapabilities::generic_chat);
 
@@ -242,22 +250,34 @@ pub fn create_profile(
     // For Native/Stateless Responses, we use a common pass-through handler
     // with capability-driven field filtering.
     match caps.endpoint_mode {
-        EndpointMode::ChatCompletionsShim => create_chat_shim_profile(profile_name, caps),
+        EndpointMode::ChatCompletionsShim => {
+            create_chat_shim_profile(profile_name, caps, extra_body)
+        }
         EndpointMode::NativeResponses | EndpointMode::StatelessResponses => {
-            create_responses_profile(profile_name, caps)
+            create_responses_profile(profile_name, caps, extra_body)
         }
     }
 }
 
-fn create_chat_shim_profile(name: &str, caps: ProviderCapabilities) -> Box<dyn ProviderProfile> {
+fn create_chat_shim_profile(
+    name: &str,
+    caps: ProviderCapabilities,
+    extra_body: ExtraBody,
+) -> Box<dyn ProviderProfile> {
     match name {
-        "deepseek-chat" | "deepseek" => Box::new(DeepSeekProvider::new(caps)),
-        "sglang-chat" | "sglang" => Box::new(SglangProvider::new(caps)),
-        "vllm-chat" | "vllm" => Box::new(VllmProvider::new(caps)),
-        _ => Box::new(GenericProvider::named(name, caps)),
+        "deepseek-chat" | "deepseek" => {
+            Box::new(DeepSeekProvider::new(caps).with_extra_body(extra_body))
+        }
+        "sglang-chat" | "sglang" => Box::new(SglangProvider::new(caps).with_extra_body(extra_body)),
+        "vllm-chat" | "vllm" => Box::new(VllmProvider::new(caps).with_extra_body(extra_body)),
+        _ => Box::new(GenericProvider::named(name, caps).with_extra_body(extra_body)),
     }
 }
 
-fn create_responses_profile(name: &str, caps: ProviderCapabilities) -> Box<dyn ProviderProfile> {
-    Box::new(PassthroughProvider::new(caps, name))
+fn create_responses_profile(
+    name: &str,
+    caps: ProviderCapabilities,
+    extra_body: ExtraBody,
+) -> Box<dyn ProviderProfile> {
+    Box::new(PassthroughProvider::new(caps, name).with_extra_body(extra_body))
 }

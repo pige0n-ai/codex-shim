@@ -16,6 +16,11 @@ impl DeepSeekProvider {
             extra_body: ExtraBody::default(),
         }
     }
+
+    pub fn with_extra_body(mut self, eb: ExtraBody) -> Self {
+        self.extra_body = eb;
+        self
+    }
 }
 
 impl ProviderProfile for DeepSeekProvider {
@@ -46,7 +51,11 @@ impl ProviderProfile for DeepSeekProvider {
     }
 
     fn pre_send(&self, req: &mut ChatCompletionRequest) {
-        if req.thinking.is_some() {
+        if req
+            .thinking
+            .as_ref()
+            .is_some_and(|thinking| thinking.thinking_type == "enabled")
+        {
             req.temperature = None;
             req.top_p = None;
             req.presence_penalty = None;
@@ -93,7 +102,7 @@ mod tests {
         ChatCompletionRequest, ChatContent, ChatFunctionCall, ChatToolCall, ThinkingConfig,
     };
 
-    fn base_request(thinking: bool) -> ChatCompletionRequest {
+    fn base_request(thinking: Option<&str>) -> ChatCompletionRequest {
         ChatCompletionRequest {
             model: "deepseek-v4-pro".into(),
             messages: vec![ChatMessage::Assistant {
@@ -121,8 +130,8 @@ mod tests {
             parallel_tool_calls: None,
             response_format: None,
             reasoning_effort: None,
-            thinking: thinking.then_some(ThinkingConfig {
-                thinking_type: "enabled".into(),
+            thinking: thinking.map(|thinking_type| ThinkingConfig {
+                thinking_type: thinking_type.into(),
             }),
             extra_body: serde_json::json!({}),
         }
@@ -131,7 +140,7 @@ mod tests {
     #[test]
     fn pre_send_adds_empty_reasoning_content_in_thinking_mode() {
         let provider = DeepSeekProvider::new(ProviderCapabilities::deepseek_chat());
-        let mut req = base_request(true);
+        let mut req = base_request(Some("enabled"));
 
         provider.pre_send(&mut req);
 
@@ -150,7 +159,7 @@ mod tests {
     #[test]
     fn pre_send_preserves_existing_reasoning_content() {
         let provider = DeepSeekProvider::new(ProviderCapabilities::deepseek_chat());
-        let mut req = base_request(true);
+        let mut req = base_request(Some("enabled"));
         if let ChatMessage::Assistant {
             reasoning_content, ..
         } = &mut req.messages[0]
@@ -171,10 +180,27 @@ mod tests {
     #[test]
     fn pre_send_leaves_reasoning_content_untouched_without_thinking_mode() {
         let provider = DeepSeekProvider::new(ProviderCapabilities::deepseek_chat());
-        let mut req = base_request(false);
+        let mut req = base_request(None);
 
         provider.pre_send(&mut req);
 
+        match &req.messages[0] {
+            ChatMessage::Assistant {
+                reasoning_content, ..
+            } => assert_eq!(reasoning_content, &None),
+            other => panic!("expected assistant message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pre_send_preserves_sampling_when_thinking_disabled() {
+        let provider = DeepSeekProvider::new(ProviderCapabilities::deepseek_chat());
+        let mut req = base_request(Some("disabled"));
+
+        provider.pre_send(&mut req);
+
+        assert_eq!(req.temperature, Some(0.7));
+        assert_eq!(req.top_p, Some(0.9));
         match &req.messages[0] {
             ChatMessage::Assistant {
                 reasoning_content, ..

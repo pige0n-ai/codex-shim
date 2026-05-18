@@ -637,6 +637,18 @@ impl Config {
         }
         validate_optional_range("sampling.temperature", self.sampling.temperature, 0.0, 2.0)?;
         validate_optional_range("sampling.top_p", self.sampling.top_p, 0.0, 1.0)?;
+        if let Some(profile_cfg) = &self.provider.profile_config
+            && matches!(profile_cfg.profile.as_str(), "deepseek-chat" | "deepseek")
+            && profile_cfg
+                .extra_body
+                .as_ref()
+                .and_then(|extra_body| extra_body.extra.get("thinking"))
+                .is_some()
+        {
+            anyhow::bail!(
+                "provider.profile_config.extra_body.thinking is not accepted for DeepSeek; use reasoning.enabled to send typed thinking mode"
+            );
+        }
         #[cfg(not(feature = "sqlite"))]
         if self.state.backend == "sqlite" {
             anyhow::bail!(
@@ -849,6 +861,23 @@ mod tests {
         config.sampling.top_p = Some(1.1);
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("sampling.top_p must be between 0 and 1"));
+    }
+
+    #[test]
+    fn validate_rejects_deepseek_extra_body_thinking() {
+        let mut config = valid_config();
+        config.provider.profile_config = Some(ProviderProfileConfig {
+            profile: "deepseek-chat".into(),
+            extra_body: Some(providers::ExtraBody {
+                extra: serde_json::json!({"thinking": "enabled"}),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        let err = config.validate().unwrap_err().to_string();
+
+        assert!(err.contains("extra_body.thinking is not accepted for DeepSeek"));
     }
 
     #[test]
