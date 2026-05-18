@@ -1272,6 +1272,7 @@ fn validate_tools(tools: &Value) -> Result<(), ApiError> {
         match item_type {
             "function" => {}
             "namespace" => {}
+            "custom" => {}
             "web_search" | "web_search_preview" => {
                 return Err(ApiError::hosted_tool_not_supported("web_search"));
             }

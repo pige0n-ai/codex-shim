@@ -1,5 +1,6 @@
 use protocol::chat::{ChatFunctionDef, ChatTool};
 use protocol::responses::{ResponseInput, ResponseTool, ToolChoice};
+use serde_json;
 
 /// Map Responses tool definitions → Chat Completions tools.
 pub fn map_response_tools(tools: &[ResponseTool]) -> Vec<ChatTool> {
@@ -25,6 +26,15 @@ pub fn map_response_tools(tools: &[ResponseTool]) -> Vec<ChatTool> {
             ResponseTool::ComputerUse { .. } => None,
             ResponseTool::FileSearch { .. } => None,
             ResponseTool::WebSearchPreview { .. } => None,
+            ResponseTool::Custom { name, description } => Some(ChatTool {
+                tool_type: "function".into(),
+                function: ChatFunctionDef {
+                    name: name.clone(),
+                    description: Some(description.clone()),
+                    parameters: Some(serde_json::json!({"type": "object", "properties": {}})),
+                    strict: Some(false),
+                },
+            }),
             ResponseTool::Mcp { .. }
             | ResponseTool::UnknownTool
             | ResponseTool::Namespace { .. } => None,
