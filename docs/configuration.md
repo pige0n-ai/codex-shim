@@ -159,6 +159,14 @@ config field is `null` or omitted, codex-shim leaves it out of the upstream
 request body. Provider-specific `pre_send` rules still run last, so profiles
 that must remove sampling while reasoning/thinking is enabled continue to do so.
 
+For DeepSeek chat profiles, `reasoning.enabled` controls the typed
+`thinking.type` field. `reasoning.enabled: true` sends
+`thinking: {type: enabled}` and removes sampling parameters before the upstream
+request. `reasoning.enabled: false` sends `thinking: {type: disabled}`, allowing
+sampling defaults such as `temperature: 0.0` to remain effective. Do not put a
+DeepSeek `thinking` field under `provider.profile_config.extra_body`; the config
+validator rejects that shape so invalid OpenAI-compatible payloads fail early.
+
 ## Other Blocks
 
 ```yaml

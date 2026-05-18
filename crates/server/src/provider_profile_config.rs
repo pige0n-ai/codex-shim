@@ -1,7 +1,7 @@
 use protocol::provider_caps::{
     EndpointMode, ProviderCapabilities, ReasoningPolicy, StatePolicy, ToolPolicy,
 };
-use providers::{ProviderProfile, create_profile, preset_capabilities};
+use providers::{ProviderProfile, create_profile_with_extra_body, preset_capabilities};
 use serde::{Deserialize, Serialize};
 
 /// Provider profile configuration (from YAML).
@@ -77,7 +77,11 @@ impl ProviderProfileConfig {
             apply_capability_overrides(base, o)
         });
 
-        create_profile(&self.profile, override_caps)
+        create_profile_with_extra_body(
+            &self.profile,
+            override_caps,
+            self.extra_body.clone().unwrap_or_default(),
+        )
     }
 }
 
@@ -177,5 +181,26 @@ fn parse_state_policy(s: &str) -> StatePolicy {
         "upstream_previous_response_id" => StatePolicy::UpstreamPreviousResponseId,
         "upstream_stateless_full_history" => StatePolicy::UpstreamStatelessFullHistory,
         _ => StatePolicy::AdapterStateful,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_profile_applies_extra_body() {
+        let config = ProviderProfileConfig {
+            profile: "generic-chat".into(),
+            extra_body: Some(providers::ExtraBody {
+                enable_thinking: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let profile = config.build_profile();
+
+        assert_eq!(profile.extra_body().enable_thinking, Some(true));
     }
 }
