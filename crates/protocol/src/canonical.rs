@@ -896,6 +896,14 @@ fn parse_tools(
             ResponseTool::Mcp { .. } => {
                 warnings.push("hosted tool 'mcp' was requested but is not supported".into());
             }
+            ResponseTool::Custom { name, description } => {
+                parsed.push(CanonicalTool {
+                    name: name.clone(),
+                    description: Some(description.clone()),
+                    parameters: Some(serde_json::json!({"type": "object", "properties": {}})),
+                    strict: Some(false),
+                });
+            }
             ResponseTool::UnknownTool => {
                 return Err(ApiError::unsupported_tool_type("unknown", 0).to_string());
             }

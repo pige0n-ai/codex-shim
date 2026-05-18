@@ -273,6 +273,8 @@ pub enum ResponseTool {
         description: String,
         tools: Vec<NamespaceTool>,
     },
+    #[serde(rename = "custom")]
+    Custom { name: String, description: String },
     /// Catch-all for future/unknown tool types.
     #[serde(other)]
     UnknownTool,
