@@ -45,6 +45,9 @@ fn sse_event_type(event: &ResponseSseEvent) -> &str {
         ResponseSseEvent::ResponseFunctionCallArgumentsDone { .. } => {
             "response.function_call_arguments.done"
         }
+        ResponseSseEvent::ResponseCustomToolCallInputDelta { .. } => {
+            "response.custom_tool_call_input.delta"
+        }
         ResponseSseEvent::ResponseCompleted { .. } => "response.completed",
         ResponseSseEvent::ResponseFailed { .. } => "response.failed",
         ResponseSseEvent::Error { .. } => "error",

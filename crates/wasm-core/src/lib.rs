@@ -78,6 +78,7 @@ pub fn process_sse_chunk(chunk_json: &str, state_json: &str) -> Result<String, J
         state.model,
         state.created_at,
         state.output_item_id,
+        std::collections::BTreeSet::new(),
     );
 
     let events = stream_state

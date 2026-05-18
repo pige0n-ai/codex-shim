@@ -6,6 +6,9 @@ use protocol::responses::{
 };
 
 use crate::MappingConfig;
+use crate::custom_tools::{
+    custom_tool_arguments, custom_tool_input_from_arguments, custom_tool_names,
+};
 use crate::tool_call_normalizer::normalize_chat_tool_calls;
 
 /// Map an upstream Chat Completions response back to a Responses API object.
@@ -41,16 +44,31 @@ pub fn map_chat_response_to_responses(
     }
 
     // 2. Emit tool call items
+    let custom_names = original_req
+        .tools
+        .as_deref()
+        .map(custom_tool_names)
+        .unwrap_or_default();
     if let Some(tool_calls) = &msg.tool_calls {
         for tc in normalize_chat_tool_calls(tool_calls) {
             let fn_name = tc.function.name.clone().unwrap_or_default();
-            output.push(ResponseOutputItem::FunctionCall {
-                id: format!("fc_{}", uuid::Uuid::new_v4()),
-                status: "completed".into(),
-                call_id: tc.id.clone(),
-                name: fn_name,
-                arguments: tc.function.arguments.clone(),
-            });
+            if custom_names.contains(&fn_name) {
+                output.push(ResponseOutputItem::CustomToolCall {
+                    id: format!("fc_{}", uuid::Uuid::new_v4()),
+                    status: "completed".into(),
+                    call_id: tc.id.clone(),
+                    name: fn_name.clone(),
+                    input: custom_tool_input_from_arguments(&fn_name, &tc.function.arguments)?,
+                });
+            } else {
+                output.push(ResponseOutputItem::FunctionCall {
+                    id: format!("fc_{}", uuid::Uuid::new_v4()),
+                    status: "completed".into(),
+                    call_id: tc.id.clone(),
+                    name: fn_name,
+                    arguments: tc.function.arguments.clone(),
+                });
+            }
         }
     }
 
@@ -217,6 +235,31 @@ pub fn build_responses_canonical_messages(
                             function: protocol::chat::ChatFunctionCall {
                                 name: Some(name.to_string()),
                                 arguments: arguments.to_string(),
+                            },
+                        });
+                        i += 1;
+                    }
+                    msgs.push(protocol::chat::ChatMessage::Assistant {
+                        content: None,
+                        name: None,
+                        tool_calls: Some(tool_calls),
+                        reasoning_content: pending_reasoning.take(),
+                    });
+                }
+                Some("custom_tool_call") => {
+                    let mut tool_calls = Vec::new();
+                    while let Some(item) = output.get(i)
+                        && item.get("type").and_then(|t| t.as_str()) == Some("custom_tool_call")
+                    {
+                        let call_id = item.get("call_id").and_then(|c| c.as_str()).unwrap_or("");
+                        let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                        let input = item.get("input").and_then(|a| a.as_str()).unwrap_or("");
+                        tool_calls.push(protocol::chat::ChatToolCall {
+                            id: call_id.to_string(),
+                            call_type: "function".to_string(),
+                            function: protocol::chat::ChatFunctionCall {
+                                name: Some(name.to_string()),
+                                arguments: custom_tool_arguments(input),
                             },
                         });
                         i += 1;

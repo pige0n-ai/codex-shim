@@ -677,8 +677,8 @@ fn map_input_item(item: &InputItem) -> Result<CanonicalItem, String> {
             ..
         } => Ok(CanonicalItem::FunctionCall(CanonicalFunctionCall {
             call_id: call_id.clone(),
-            name: format!("__custom__{name}"),
-            arguments: serde_json::to_string(input).unwrap_or_default(),
+            name: name.clone(),
+            arguments: custom_tool_arguments(input),
         })),
         InputItem::LocalShellCall {
             call_id,
@@ -896,11 +896,15 @@ fn parse_tools(
             ResponseTool::Mcp { .. } => {
                 warnings.push("hosted tool 'mcp' was requested but is not supported".into());
             }
-            ResponseTool::Custom { name, description } => {
+            ResponseTool::Custom {
+                name,
+                description,
+                format,
+            } => {
                 parsed.push(CanonicalTool {
                     name: name.clone(),
-                    description: Some(description.clone()),
-                    parameters: Some(serde_json::json!({"type": "object", "properties": {}})),
+                    description: Some(custom_tool_description(description, format)),
+                    parameters: Some(custom_tool_schema()),
                     strict: Some(false),
                 });
             }
@@ -912,6 +916,42 @@ fn parse_tools(
         }
     }
     Ok(parsed)
+}
+
+fn custom_tool_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "input": {
+                "type": "string",
+                "description": "Raw freeform tool input. Do not wrap or transform the tool payload inside this string."
+            }
+        },
+        "required": ["input"],
+        "additionalProperties": false
+    })
+}
+
+fn custom_tool_description(
+    description: &str,
+    format: &crate::responses::CustomToolFormat,
+) -> String {
+    format!(
+        "{description}\n\n\
+Chat adapter contract: call this function with a JSON object containing exactly one string field named `input`. \
+The `input` value must be the raw freeform tool input; do not wrap the freeform payload in JSON inside that string.\n\n\
+Freeform format:\n\
+- type: {format_type}\n\
+- syntax: {syntax}\n\
+- definition:\n{definition}",
+        format_type = format.format_type,
+        syntax = format.syntax,
+        definition = format.definition
+    )
+}
+
+fn custom_tool_arguments(input: &str) -> String {
+    serde_json::json!({ "input": input }).to_string()
 }
 
 fn parse_tool_choice(tc: &ResponsesToolChoice) -> ToolChoice {

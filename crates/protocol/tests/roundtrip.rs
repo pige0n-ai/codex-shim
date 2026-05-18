@@ -93,6 +93,58 @@ mod tests {
     }
 
     #[test]
+    fn deserialize_custom_tool_preserves_format() {
+        let json = r#"{
+            "model": "deepseek-v4-pro",
+            "input": "edit",
+            "tools": [
+                {
+                    "type": "custom",
+                    "name": "apply_patch",
+                    "description": "Use apply_patch",
+                    "format": {
+                        "type": "grammar",
+                        "syntax": "lark",
+                        "definition": "start: \"patch\""
+                    }
+                }
+            ]
+        }"#;
+        let req: ResponsesCreateRequest = serde_json::from_str(json).unwrap();
+        match &req.tools.unwrap()[0] {
+            ResponseTool::Custom {
+                name,
+                description,
+                format,
+            } => {
+                assert_eq!(name, "apply_patch");
+                assert_eq!(description, "Use apply_patch");
+                assert_eq!(format.format_type, "grammar");
+                assert_eq!(format.syntax, "lark");
+                assert_eq!(format.definition, "start: \"patch\"");
+            }
+            other => panic!("expected custom tool, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserialize_custom_tool_requires_format() {
+        let json = r#"{
+            "model": "deepseek-v4-pro",
+            "input": "edit",
+            "tools": [
+                {
+                    "type": "custom",
+                    "name": "apply_patch",
+                    "description": "Use apply_patch"
+                }
+            ]
+        }"#;
+        let err = serde_json::from_str::<ResponsesCreateRequest>(json).unwrap_err();
+        assert!(err.to_string().contains("missing field `format`"));
+    }
+
+    #[test]
     fn deserialize_with_reasoning() {
         let json = r#"{
             "model": "deepseek-v4-pro",

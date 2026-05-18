@@ -72,6 +72,13 @@ pub enum ResponseSseEvent {
         name: String,
     },
 
+    #[serde(rename = "response.custom_tool_call_input.delta")]
+    ResponseCustomToolCallInputDelta {
+        item_id: String,
+        output_index: u32,
+        delta: String,
+    },
+
     #[serde(rename = "response.completed")]
     ResponseCompleted { response: SseResponseShell },
 
