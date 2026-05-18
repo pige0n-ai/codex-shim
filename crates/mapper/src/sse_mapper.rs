@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use protocol::chat::{ChatCompletionChunk, ChatFunctionCall, ChatToolCall};
 use protocol::common::ContentPart;
 use protocol::error::ApiError;
@@ -5,6 +7,7 @@ use protocol::responses::{ResponseOutputItem, SummaryPart};
 use protocol::sse::{ResponseSseEvent, SseResponseShell};
 use uuid::Uuid;
 
+use crate::custom_tools::custom_tool_input_from_arguments;
 use crate::tool_call_normalizer::split_concatenated_json_objects;
 
 /// Mutable state for tracking SSE event emission across a stream.
@@ -29,6 +32,7 @@ pub struct StreamState {
     pub reasoning_content: String,
     final_usage: Option<protocol::common::Usage>,
     pub finish_reason: Option<String>,
+    custom_tool_names: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -41,13 +45,40 @@ struct StreamToolCall {
 }
 
 impl StreamToolCall {
-    fn output_item(&self, status: &str) -> ResponseOutputItem {
-        ResponseOutputItem::FunctionCall {
-            id: self.item_id.clone(),
-            status: status.into(),
-            call_id: self.call_id.clone().unwrap_or_default(),
-            name: self.name.clone().unwrap_or_default(),
-            arguments: self.arguments.clone(),
+    fn is_custom(&self, custom_tool_names: &BTreeSet<String>) -> bool {
+        self.name
+            .as_deref()
+            .is_some_and(|name| custom_tool_names.contains(name))
+    }
+
+    fn output_item(
+        &self,
+        status: &str,
+        custom_tool_names: &BTreeSet<String>,
+    ) -> Result<ResponseOutputItem, ApiError> {
+        let call_id = self.call_id.clone().unwrap_or_default();
+        let name = self.name.clone().unwrap_or_default();
+        if self.is_custom(custom_tool_names) {
+            let input = if status == "completed" {
+                custom_tool_input_from_arguments(&name, &self.arguments)?
+            } else {
+                String::new()
+            };
+            Ok(ResponseOutputItem::CustomToolCall {
+                id: self.item_id.clone(),
+                status: status.into(),
+                call_id,
+                name,
+                input,
+            })
+        } else {
+            Ok(ResponseOutputItem::FunctionCall {
+                id: self.item_id.clone(),
+                status: status.into(),
+                call_id,
+                name,
+                arguments: self.arguments.clone(),
+            })
         }
     }
 }
@@ -58,6 +89,7 @@ impl StreamState {
         model: String,
         created_at: i64,
         output_item_id: String,
+        custom_tool_names: BTreeSet<String>,
     ) -> Self {
         Self {
             response_id,
@@ -79,6 +111,7 @@ impl StreamState {
             reasoning_content: String::new(),
             final_usage: None,
             finish_reason: None,
+            custom_tool_names,
         }
     }
 
@@ -253,18 +286,21 @@ impl StreamState {
                 if emit_added {
                     events.push(ResponseSseEvent::ResponseOutputItemAdded {
                         output_index: tc.index,
-                        item: self.tool_calls[pos].output_item("in_progress"),
+                        item: self.tool_calls[pos]
+                            .output_item("in_progress", &self.custom_tool_names)?,
                     });
                 }
                 if let Some(func) = &tc.function
                     && let Some(args) = &func.arguments
                 {
                     self.tool_calls[pos].arguments.push_str(args);
-                    events.push(ResponseSseEvent::ResponseFunctionCallArgumentsDelta {
-                        item_id: self.tool_calls[pos].item_id.clone(),
-                        output_index: tc.index,
-                        delta: args.clone(),
-                    });
+                    if !self.tool_calls[pos].is_custom(&self.custom_tool_names) {
+                        events.push(ResponseSseEvent::ResponseFunctionCallArgumentsDelta {
+                            item_id: self.tool_calls[pos].item_id.clone(),
+                            output_index: tc.index,
+                            delta: args.clone(),
+                        });
+                    }
                 }
 
                 if pos == 0 {
@@ -284,17 +320,20 @@ impl StreamState {
     }
 
     /// Emit the final completion lifecycle events once the upstream stream ends.
-    pub fn complete(&mut self) -> Vec<ResponseSseEvent> {
+    pub fn complete(&mut self) -> Result<Vec<ResponseSseEvent>, ApiError> {
         if self.completed_sent {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         self.completed_sent = true;
         let mut events = Vec::new();
-        self.emit_completion_events(&mut events);
-        events
+        self.emit_completion_events(&mut events)?;
+        Ok(events)
     }
 
-    fn emit_completion_events(&mut self, events: &mut Vec<ResponseSseEvent>) {
+    fn emit_completion_events(
+        &mut self,
+        events: &mut Vec<ResponseSseEvent>,
+    ) -> Result<(), ApiError> {
         let tool_calls = self.normalized_tool_calls();
 
         if self.tool_call_active {
@@ -306,18 +345,27 @@ impl StreamState {
             }) {
                 events.push(ResponseSseEvent::ResponseOutputItemAdded {
                     output_index: tool_call.index,
-                    item: tool_call.output_item("in_progress"),
+                    item: tool_call.output_item("in_progress", &self.custom_tool_names)?,
                 });
             }
 
             // Finish the tool call
             for tool_call in &tool_calls {
-                events.push(ResponseSseEvent::ResponseFunctionCallArgumentsDone {
-                    item_id: tool_call.item_id.clone(),
-                    output_index: tool_call.index,
-                    arguments: tool_call.arguments.clone(),
-                    name: tool_call.name.clone().unwrap_or_default(),
-                });
+                if tool_call.is_custom(&self.custom_tool_names) {
+                    let name = tool_call.name.clone().unwrap_or_default();
+                    events.push(ResponseSseEvent::ResponseCustomToolCallInputDelta {
+                        item_id: tool_call.item_id.clone(),
+                        output_index: tool_call.index,
+                        delta: custom_tool_input_from_arguments(&name, &tool_call.arguments)?,
+                    });
+                } else {
+                    events.push(ResponseSseEvent::ResponseFunctionCallArgumentsDone {
+                        item_id: tool_call.item_id.clone(),
+                        output_index: tool_call.index,
+                        arguments: tool_call.arguments.clone(),
+                        name: tool_call.name.clone().unwrap_or_default(),
+                    });
+                }
             }
         }
 
@@ -347,7 +395,8 @@ impl StreamState {
         let item = if self.tool_call_active {
             tool_calls
                 .first()
-                .map(|tool_call| tool_call.output_item("completed"))
+                .map(|tool_call| tool_call.output_item("completed", &self.custom_tool_names))
+                .transpose()?
                 .unwrap_or_else(|| ResponseOutputItem::FunctionCall {
                     id: self.output_item_id.clone(),
                     status: "completed".into(),
@@ -381,7 +430,7 @@ impl StreamState {
             for tool_call in tool_calls.iter().skip(1) {
                 events.push(ResponseSseEvent::ResponseOutputItemDone {
                     output_index: tool_call.index,
-                    item: tool_call.output_item("completed"),
+                    item: tool_call.output_item("completed", &self.custom_tool_names)?,
                 });
             }
         }
@@ -411,11 +460,9 @@ impl StreamState {
         }
 
         if self.tool_call_active {
-            final_output.extend(
-                tool_calls
-                    .iter()
-                    .map(|tool_call| tool_call.output_item("completed")),
-            );
+            for tool_call in &tool_calls {
+                final_output.push(tool_call.output_item("completed", &self.custom_tool_names)?);
+            }
         } else {
             final_output.push(ResponseOutputItem::Message {
                 id: self.output_item_id.clone(),
@@ -434,11 +481,14 @@ impl StreamState {
         shell.usage = Some(self.final_usage.clone().unwrap_or_default());
 
         events.push(ResponseSseEvent::ResponseCompleted { response: shell });
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::StreamState;
     use protocol::chat::{
         ChatChunkChoice, ChatCompletionChunk, ChatDelta, ChatFunctionDelta, ChatToolCallDelta,
@@ -523,10 +573,29 @@ mod tests {
         }
     }
 
+    fn stream_state() -> StreamState {
+        StreamState::new(
+            "resp_test".into(),
+            "test-model".into(),
+            1,
+            "out_1".into(),
+            BTreeSet::new(),
+        )
+    }
+
+    fn stream_state_with_custom(name: &str) -> StreamState {
+        StreamState::new(
+            "resp_test".into(),
+            "test-model".into(),
+            1,
+            "out_1".into(),
+            BTreeSet::from([name.to_string()]),
+        )
+    }
+
     #[test]
     fn complete_keeps_usage_from_final_empty_chunk() {
-        let mut state =
-            StreamState::new("resp_test".into(), "test-model".into(), 1, "out_1".into());
+        let mut state = stream_state();
 
         state
             .process_chunk(&chunk(Some("Hello"), None, None, false))
@@ -549,15 +618,14 @@ mod tests {
             ))
             .expect("usage chunk");
 
-        let events = state.complete();
+        let events = state.complete().expect("complete");
         let usage = completed_usage(&events);
         assert_eq!(usage.total_tokens, 18);
     }
 
     #[test]
     fn complete_uses_latest_streamed_usage_totals() {
-        let mut state =
-            StreamState::new("resp_test".into(), "test-model".into(), 1, "out_1".into());
+        let mut state = stream_state();
 
         state
             .process_chunk(&chunk(
@@ -588,15 +656,14 @@ mod tests {
             ))
             .expect("final chunk");
 
-        let events = state.complete();
+        let events = state.complete().expect("complete");
         let usage = completed_usage(&events);
         assert_eq!(usage.total_tokens, 13);
     }
 
     #[test]
     fn tool_only_stream_does_not_create_empty_message_item() {
-        let mut state =
-            StreamState::new("resp_test".into(), "test-model".into(), 1, "out_1".into());
+        let mut state = stream_state();
 
         let events = state
             .process_chunk(&tool_chunk(
@@ -630,8 +697,7 @@ mod tests {
 
     #[test]
     fn reasoning_before_tool_does_not_create_empty_message_item() {
-        let mut state =
-            StreamState::new("resp_test".into(), "test-model".into(), 1, "out_1".into());
+        let mut state = stream_state();
 
         let reasoning_events = state
             .process_chunk(&reasoning_chunk("thinking"))
@@ -667,9 +733,55 @@ mod tests {
     }
 
     #[test]
+    fn custom_tool_stream_emits_custom_input_delta_and_items() {
+        let mut state = stream_state_with_custom("apply_patch");
+        let input = "*** Begin Patch\n*** End Patch";
+
+        let added_events = state
+            .process_chunk(&tool_chunk(
+                vec![ChatToolCallDelta {
+                    index: 0,
+                    id: Some("call_patch".into()),
+                    function: Some(ChatFunctionDelta {
+                        name: Some("apply_patch".into()),
+                        arguments: Some(serde_json::json!({ "input": input }).to_string()),
+                    }),
+                }],
+                Some("tool_calls"),
+            ))
+            .expect("custom tool chunk");
+
+        assert!(matches!(
+            &added_events[1],
+            ResponseSseEvent::ResponseOutputItemAdded {
+                item: ResponseOutputItem::CustomToolCall { name, input, .. },
+                ..
+            } if name == "apply_patch" && input.is_empty()
+        ));
+        assert!(!added_events.iter().any(|event| {
+            matches!(
+                event,
+                ResponseSseEvent::ResponseFunctionCallArgumentsDelta { .. }
+            )
+        }));
+
+        let events = state.complete().expect("complete");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ResponseSseEvent::ResponseCustomToolCallInputDelta { delta, .. } if delta == input
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ResponseSseEvent::ResponseOutputItemDone {
+                item: ResponseOutputItem::CustomToolCall { name, input: done_input, .. },
+                ..
+            } if name == "apply_patch" && done_input == input
+        )));
+    }
+
+    #[test]
     fn complete_keeps_multiple_tool_call_arguments_separate() {
-        let mut state =
-            StreamState::new("resp_test".into(), "test-model".into(), 1, "out_1".into());
+        let mut state = stream_state();
 
         let first_args = r#"{"cmd":"cat fixture.py"}"#;
         let second_args = r#"{"cmd":"cat fixture.json"}"#;
@@ -698,7 +810,7 @@ mod tests {
             ))
             .expect("tool chunks");
 
-        let events = state.complete();
+        let events = state.complete().expect("complete");
         let completed = events
             .iter()
             .find_map(|event| match event {
@@ -727,8 +839,7 @@ mod tests {
 
     #[test]
     fn complete_splits_concatenated_single_tool_call_arguments() {
-        let mut state =
-            StreamState::new("resp_test".into(), "test-model".into(), 1, "out_1".into());
+        let mut state = stream_state();
 
         state
             .process_chunk(&tool_chunk(
@@ -744,7 +855,7 @@ mod tests {
             ))
             .expect("tool chunk");
 
-        let events = state.complete();
+        let events = state.complete().expect("complete");
         let completed = events
             .iter()
             .find_map(|event| match event {

@@ -395,6 +395,7 @@ async fn handle_stream(
             model.clone(),
             created_at,
             output_item_id.clone(),
+            mapper::custom_tools::custom_tool_names(_req.tools.as_deref().unwrap_or(&[])),
         );
 
         futures::pin_mut!(sse_stream);
@@ -414,7 +415,30 @@ async fn handle_stream(
 
                     if data == "[DONE]" {
                         upstream_sse_events.push(serde_json::json!({"data": "[DONE]"}));
-                        let events = stream_state.complete();
+                        let events = match stream_state.complete() {
+                            Ok(events) => events,
+                            Err(error) => {
+                                let failed = ResponseSseEvent::ResponseFailed {
+                                    response: {
+                                        let mut response = protocol::sse::SseResponseShell::minimal(
+                                            response_id.clone(),
+                                            model.clone(),
+                                            created_at,
+                                        );
+                                        response.status = "failed".into();
+                                        response
+                                    },
+                                };
+                                let error_event = ResponseSseEvent::Error { error: error.error };
+                                for event in [error_event, failed] {
+                                    if let Ok(event_json) = sse_event_to_value(&event) {
+                                        response_sse_events.push(event_json);
+                                    }
+                                    let _ = tx.send(Ok(event)).await;
+                                }
+                                return;
+                            }
+                        };
                         for event in &events {
                             // Capture the completed response JSON for store
                             if let ResponseSseEvent::ResponseCompleted { response } = event {
@@ -1272,7 +1296,7 @@ fn validate_tools(tools: &Value) -> Result<(), ApiError> {
         match item_type {
             "function" => {}
             "namespace" => {}
-            "custom" => {}
+            "custom" => validate_custom_tool(item, idx)?,
             "web_search" | "web_search_preview" => {
                 return Err(ApiError::hosted_tool_not_supported("web_search"));
             }
@@ -1334,7 +1358,8 @@ fn validate_input_item(item: &Value, path: &str) -> Result<(), ApiError> {
     })?;
     match item_type {
         "message" => validate_message_item(obj, path),
-        "function_call" | "custom_tool_call" | "local_shell_call" | "apply_patch_call" => Ok(()),
+        "function_call" | "local_shell_call" | "apply_patch_call" => Ok(()),
+        "custom_tool_call" => validate_custom_tool_call(obj, path),
         "function_call_output" => validate_function_call_output(obj, path),
         "custom_tool_call_output" | "local_shell_call_output" | "apply_patch_call_output" => Ok(()),
         "reasoning" => validate_reasoning_item(obj, path),
@@ -1345,6 +1370,52 @@ fn validate_input_item(item: &Value, path: &str) -> Result<(), ApiError> {
         "computer_call" => Err(ApiError::unsupported_input_item("computer_call")),
         "input_file" => Err(ApiError::file_input_not_supported()),
         other => Err(ApiError::unknown_input_item(Some(other))),
+    }
+}
+
+fn validate_custom_tool(item: &Value, idx: usize) -> Result<(), ApiError> {
+    let format = item.get("format").ok_or_else(|| {
+        ApiError::invalid_parameter(
+            format!("tools[{idx}].format"),
+            "missing_required_parameter",
+            "custom tools must include a 'format' object",
+        )
+    })?;
+    let format_obj = format.as_object().ok_or_else(|| {
+        ApiError::invalid_parameter(
+            format!("tools[{idx}].format"),
+            "invalid_format",
+            "custom tool format must be an object",
+        )
+    })?;
+    for field in ["type", "syntax", "definition"] {
+        if !format_obj.get(field).is_some_and(Value::is_string) {
+            return Err(ApiError::invalid_parameter(
+                format!("tools[{idx}].format.{field}"),
+                "invalid_format",
+                format!("custom tool format field '{field}' must be a string"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_custom_tool_call(obj: &Map<String, Value>, path: &str) -> Result<(), ApiError> {
+    let input = obj.get("input").ok_or_else(|| {
+        ApiError::invalid_parameter(
+            format!("{path}.input"),
+            "missing_required_parameter",
+            "custom_tool_call input must be a string",
+        )
+    })?;
+    if input.is_string() {
+        Ok(())
+    } else {
+        Err(ApiError::invalid_parameter(
+            format!("{path}.input"),
+            "invalid_custom_tool_input",
+            "custom_tool_call input must be a string",
+        ))
     }
 }
 
@@ -1543,5 +1614,39 @@ mod tests {
 
         assert_eq!(req.temperature, Some(0.7));
         assert_eq!(req.top_p, Some(0.9));
+    }
+
+    #[test]
+    fn validate_tools_rejects_custom_without_format() {
+        let tools = serde_json::json!([
+            {
+                "type": "custom",
+                "name": "apply_patch",
+                "description": "Use apply_patch"
+            }
+        ]);
+
+        let err = validate_tools(&tools).unwrap_err();
+
+        assert_eq!(err.error.param.as_deref(), Some("tools[0].format"));
+        assert_eq!(
+            err.error.code.as_deref(),
+            Some("missing_required_parameter")
+        );
+    }
+
+    #[test]
+    fn validate_input_item_rejects_non_string_custom_tool_input() {
+        let item = serde_json::json!({
+            "type": "custom_tool_call",
+            "call_id": "call_patch",
+            "name": "apply_patch",
+            "input": {"patch": "*** Begin Patch"}
+        });
+
+        let err = validate_input_item(&item, "input[0]").unwrap_err();
+
+        assert_eq!(err.error.param.as_deref(), Some("input[0].input"));
+        assert_eq!(err.error.code.as_deref(), Some("invalid_custom_tool_input"));
     }
 }

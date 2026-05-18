@@ -8,6 +8,14 @@ mod tests {
         MappingConfig::default()
     }
 
+    fn custom_format() -> CustomToolFormat {
+        CustomToolFormat {
+            format_type: "grammar".into(),
+            syntax: "lark".into(),
+            definition: "start: \"patch\"".into(),
+        }
+    }
+
     #[test]
     fn simple_text_input() {
         let req = ResponsesCreateRequest {
@@ -130,6 +138,50 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].function.name, "get_weather");
         assert_eq!(tools[0].function.strict, Some(true));
+    }
+
+    #[test]
+    fn custom_tool_mapping_uses_single_input_schema_and_preserves_format_guidance() {
+        let req = ResponsesCreateRequest {
+            model: "deepseek-v4-pro".into(),
+            input: ResponseInput::Text("edit".into()),
+            instructions: None,
+            previous_response_id: None,
+            store: None,
+            stream: Some(false),
+            max_output_tokens: None,
+            temperature: None,
+            top_p: None,
+            tools: Some(vec![ResponseTool::Custom {
+                name: "apply_patch".into(),
+                description: "Use apply_patch".into(),
+                format: custom_format(),
+            }]),
+            tool_choice: None,
+            parallel_tool_calls: None,
+            reasoning: None,
+            text: None,
+            include: None,
+            metadata: None,
+        };
+
+        let result = responses_to_chat(&req, &[], &default_config()).unwrap();
+        let tool = &result.chat_request.tools.unwrap()[0];
+
+        assert_eq!(tool.tool_type, "function");
+        assert_eq!(tool.function.name, "apply_patch");
+        assert_eq!(
+            tool.function.parameters.as_ref().unwrap()["required"][0],
+            "input"
+        );
+        assert!(tool.function.parameters.as_ref().unwrap()["properties"]["input"].is_object());
+        assert!(
+            tool.function
+                .description
+                .as_deref()
+                .unwrap()
+                .contains("syntax: lark")
+        );
     }
 
     #[test]
@@ -315,6 +367,125 @@ mod tests {
             }
             _ => panic!("expected tool message"),
         }
+    }
+
+    #[test]
+    fn custom_tool_call_history_uses_input_adapter() {
+        let req = ResponsesCreateRequest {
+            model: "deepseek-v4-pro".into(),
+            input: ResponseInput::Items(vec![
+                InputItem::CustomToolCall {
+                    id: None,
+                    call_id: "call_patch".into(),
+                    name: "apply_patch".into(),
+                    input: "*** Begin Patch\n*** End Patch".into(),
+                },
+                InputItem::CustomToolCallOutput {
+                    id: None,
+                    call_id: "call_patch".into(),
+                    output: "ok".into(),
+                },
+            ]),
+            instructions: None,
+            previous_response_id: None,
+            store: None,
+            stream: Some(false),
+            max_output_tokens: None,
+            temperature: None,
+            top_p: None,
+            tools: None,
+            tool_choice: None,
+            parallel_tool_calls: None,
+            reasoning: None,
+            text: None,
+            include: None,
+            metadata: None,
+        };
+
+        let result = responses_to_chat(&req, &[], &default_config()).unwrap();
+        match &result.chat_request.messages[0] {
+            ChatMessage::Assistant {
+                tool_calls: Some(tool_calls),
+                ..
+            } => {
+                assert_eq!(tool_calls[0].function.name.as_deref(), Some("apply_patch"));
+                assert_eq!(
+                    tool_calls[0].function.arguments,
+                    r#"{"input":"*** Begin Patch\n*** End Patch"}"#
+                );
+            }
+            other => panic!("expected assistant custom tool call, got {other:?}"),
+        }
+        assert!(matches!(
+            &result.chat_request.messages[1],
+            ChatMessage::Tool { tool_call_id, .. } if tool_call_id == "call_patch"
+        ));
+    }
+
+    #[test]
+    fn chat_custom_function_call_maps_back_to_custom_tool_call() {
+        let req = ResponsesCreateRequest {
+            model: "deepseek-v4-pro".into(),
+            input: ResponseInput::Text("edit".into()),
+            instructions: None,
+            previous_response_id: None,
+            store: None,
+            stream: Some(false),
+            max_output_tokens: None,
+            temperature: None,
+            top_p: None,
+            tools: Some(vec![ResponseTool::Custom {
+                name: "apply_patch".into(),
+                description: "Use apply_patch".into(),
+                format: custom_format(),
+            }]),
+            tool_choice: None,
+            parallel_tool_calls: None,
+            reasoning: None,
+            text: None,
+            include: None,
+            metadata: None,
+        };
+        let chat = ChatCompletionResponse {
+            id: "chat_1".into(),
+            object: "chat.completion".into(),
+            created: 1,
+            model: "deepseek-v4-pro".into(),
+            choices: Some(vec![ChatCompletionChoice {
+                index: 0,
+                message: ChatCompletionMessage {
+                    role: "assistant".into(),
+                    content: None,
+                    reasoning_content: None,
+                    tool_calls: Some(vec![ChatToolCall {
+                        id: "call_patch".into(),
+                        call_type: "function".into(),
+                        function: ChatFunctionCall {
+                            name: Some("apply_patch".into()),
+                            arguments: r#"{"input":"*** Begin Patch\n*** End Patch"}"#.into(),
+                        },
+                    }]),
+                },
+                finish_reason: Some("tool_calls".into()),
+            }]),
+            usage: None,
+            system_fingerprint: None,
+        };
+
+        let response = response_mapper::map_chat_response_to_responses(
+            &chat,
+            "resp_1",
+            "out_1",
+            &req,
+            &default_config(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            &response.output[0],
+            ResponseOutputItem::CustomToolCall { name, input, .. }
+                if name == "apply_patch" && input == "*** Begin Patch\n*** End Patch"
+        ));
     }
 
     #[test]

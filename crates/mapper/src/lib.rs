@@ -2,6 +2,7 @@ use protocol::chat::ChatCompletionRequest;
 use protocol::chat::ChatMessage;
 use protocol::responses::ResponsesCreateRequest;
 
+pub mod custom_tools;
 pub mod error_mapper;
 pub mod input_mapper;
 pub mod multimodal_mapper;

@@ -88,7 +88,7 @@ pub enum InputItem {
         id: Option<String>,
         call_id: String,
         name: String,
-        input: serde_json::Value,
+        input: String,
     },
     #[serde(rename = "custom_tool_call_output")]
     CustomToolCallOutput {
@@ -274,7 +274,11 @@ pub enum ResponseTool {
         tools: Vec<NamespaceTool>,
     },
     #[serde(rename = "custom")]
-    Custom { name: String, description: String },
+    Custom {
+        name: String,
+        description: String,
+        format: CustomToolFormat,
+    },
     /// Catch-all for future/unknown tool types.
     #[serde(other)]
     UnknownTool,
@@ -293,6 +297,14 @@ pub enum NamespaceTool {
         #[serde(skip_serializing_if = "Option::is_none")]
         strict: Option<bool>,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CustomToolFormat {
+    #[serde(rename = "type")]
+    pub format_type: String,
+    pub syntax: String,
+    pub definition: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -410,7 +422,7 @@ pub enum ResponseOutputItem {
         status: String,
         call_id: String,
         name: String,
-        input: serde_json::Value,
+        input: String,
     },
     #[serde(rename = "local_shell_call")]
     LocalShellCall {

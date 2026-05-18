@@ -4,6 +4,8 @@ use protocol::responses::{
     InputItem, InputMessageRole, MessageContent, ResponseInput, SummaryPart,
 };
 
+use crate::custom_tools::custom_tool_arguments;
+
 /// Check if the input contains any reasoning items.
 pub fn has_reasoning_item(input: &ResponseInput) -> bool {
     match input {
@@ -243,8 +245,8 @@ fn map_input_item_to_message(item: &InputItem) -> Result<ChatMessage, ApiError> 
                 id: call_id.clone(),
                 call_type: "function".into(),
                 function: protocol::chat::ChatFunctionCall {
-                    name: Some(format!("__custom__{name}")),
-                    arguments: serde_json::to_string(input).unwrap_or_default(),
+                    name: Some(name.clone()),
+                    arguments: custom_tool_arguments(input),
                 },
             }]),
             reasoning_content: None,
