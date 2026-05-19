@@ -1275,7 +1275,8 @@ models:
   default: "{model_slug}"
   catalog:
     - slug: "{model_slug}"
-      context_window: {context_window}{reasoning_levels_yaml}
+      context_window: {context_window}
+      apply_patch_tool_type: freeform{reasoning_levels_yaml}
 
 state:
   backend: memory
@@ -1407,7 +1408,8 @@ models:
   default: "{model_slug}"
   catalog:
     - slug: "{model_slug}"
-      context_window: {context_window}{reasoning_levels_yaml}
+      context_window: {context_window}
+      apply_patch_tool_type: freeform{reasoning_levels_yaml}
 
 state:
   backend: memory
@@ -2702,6 +2704,27 @@ command = "/bin/true"
             .join("codex-home");
         let path = resolve_catalog_path(&codex_home, None).expect("default catalog path");
         assert_eq!(path, codex_home.join("model-catalog-shim.json"));
+    }
+
+    #[test]
+    fn setup_slim_config_enables_apply_patch_in_explicit_catalog() {
+        let config_yaml = generate_slim_config(
+            "deepseek-chat",
+            "DEEPSEEK_API_KEY",
+            "deepseek-v4-pro",
+            131072,
+            true,
+            "high",
+            None,
+            "127.0.0.1:8787",
+        );
+
+        let config: Config = serde_yaml::from_str(&config_yaml).expect("parse setup config");
+
+        assert_eq!(
+            config.models.catalog[0].apply_patch_tool_type.as_deref(),
+            Some("freeform")
+        );
     }
 
     #[test]
