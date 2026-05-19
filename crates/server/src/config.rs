@@ -604,7 +604,7 @@ impl Config {
                 auto_compact_token_limit: None,
                 supports_search_tool: Some(false),
                 supports_reasoning_summaries: Some(false),
-                apply_patch_tool_type: None,
+                apply_patch_tool_type: Some("freeform".to_string()),
                 supports_image_detail_original: Some(false),
             }];
             tracing::info!(
@@ -669,6 +669,15 @@ impl Config {
                     anyhow::bail!(
                         "models.catalog entry '{}' must have a positive context_window",
                         model.slug
+                    );
+                }
+                if let Some(apply_patch_tool_type) = &model.apply_patch_tool_type
+                    && apply_patch_tool_type != "freeform"
+                {
+                    anyhow::bail!(
+                        "models.catalog entry '{}' has unsupported apply_patch_tool_type '{}'; only 'freeform' is supported",
+                        model.slug,
+                        apply_patch_tool_type
                     );
                 }
             }
@@ -829,6 +838,29 @@ mod tests {
         config
             .validate()
             .expect("should accept empty catalog when models.default is set");
+    }
+
+    #[test]
+    fn expand_from_profile_auto_catalog_enables_apply_patch() {
+        let mut config = Config::default();
+        config.models.catalog.clear();
+
+        config.expand_from_profile();
+
+        assert_eq!(
+            config.models.catalog[0].apply_patch_tool_type.as_deref(),
+            Some("freeform")
+        );
+    }
+
+    #[test]
+    fn validate_rejects_unsupported_apply_patch_tool_type() {
+        let mut config = valid_config();
+        config.models.catalog[0].apply_patch_tool_type = Some("function".into());
+
+        let err = config.validate().unwrap_err().to_string();
+
+        assert!(err.contains("unsupported apply_patch_tool_type"));
     }
 
     #[test]

@@ -177,8 +177,8 @@ models:
       supports_reasoning_summaries: false
 
       # Optional apply_patch tool type if you want Codex to expose patch editing
-      # through the model catalog.
-      apply_patch_tool_type: null
+      # through the model catalog. The only supported callable type is freeform.
+      apply_patch_tool_type: freeform
 
       # Whether Codex may send image detail = "original".
       supports_image_detail_original: false

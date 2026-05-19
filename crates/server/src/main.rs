@@ -390,7 +390,7 @@ fn cmd_generate_catalog(
             auto_compact_token_limit: None,
             supports_search_tool: Some(false),
             supports_reasoning_summaries: Some(false),
-            apply_patch_tool_type: None,
+            apply_patch_tool_type: Some("freeform".to_string()),
             supports_image_detail_original: Some(false),
         }],
         &caps,
