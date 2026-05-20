@@ -99,13 +99,11 @@ pub fn structured_schema() -> Value {
     })
 }
 
-pub fn structured_description(original_description: &str) -> String {
-    format!(
-        "{original_description}\n\n\
-Chat adapter contract: this upstream tool uses structured JSON. The shim will compile the JSON AST into the raw Codex apply_patch payload before returning it to Codex.\n\n\
+pub fn structured_description(_original_description: &str) -> String {
+    "Use this tool to edit files. This upstream Chat Completions tool uses structured JSON; the shim compiles the JSON AST into Codex apply_patch syntax before returning it to Codex.\n\n\
 Use `hunks` for normal edits. Do not include `*** Begin Patch`, `*** End Patch`, line-prefix characters, or unified diff headers in the JSON fields; the shim writes those markers. \
 For update changes, each line object uses `op`: `context`, `remove`, or `add`. `anchor` is literal text after `@@`, not a line range. Set `end_of_file` only when the change must match the physical end of the file."
-    )
+        .into()
 }
 
 pub fn structured_arguments_from_patch_input(input: &str) -> String {

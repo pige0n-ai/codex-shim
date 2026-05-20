@@ -218,13 +218,10 @@ mod tests {
         let tool = &result.chat_request.tools.unwrap()[0];
 
         assert_eq!(tool.function.name, "apply_patch");
-        assert!(
-            tool.function
-                .description
-                .as_deref()
-                .unwrap()
-                .contains("structured JSON")
-        );
+        let description = tool.function.description.as_deref().unwrap();
+        assert!(description.contains("structured JSON"));
+        assert!(!description.contains("FREEFORM"));
+        assert!(!description.contains("do not wrap the patch in JSON"));
         assert!(tool.function.parameters.as_ref().unwrap()["properties"]["hunks"].is_object());
         assert!(tool.function.parameters.as_ref().unwrap()["$defs"]["update_hunk"].is_object());
     }
