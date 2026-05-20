@@ -185,6 +185,51 @@ mod tests {
     }
 
     #[test]
+    fn apply_patch_structured_mapping_uses_ast_schema() {
+        let req = ResponsesCreateRequest {
+            model: "deepseek-v4-pro".into(),
+            input: ResponseInput::Text("edit".into()),
+            instructions: None,
+            previous_response_id: None,
+            store: None,
+            stream: Some(false),
+            max_output_tokens: None,
+            temperature: None,
+            top_p: None,
+            tools: Some(vec![ResponseTool::Custom {
+                name: "apply_patch".into(),
+                description: "Use apply_patch".into(),
+                format: custom_format(),
+            }]),
+            tool_choice: None,
+            parallel_tool_calls: None,
+            reasoning: None,
+            text: None,
+            include: None,
+            metadata: None,
+        };
+        let config = MappingConfig {
+            apply_patch_upstream_tool_type: apply_patch_tool::APPLY_PATCH_UPSTREAM_STRUCTURED
+                .into(),
+            ..MappingConfig::default()
+        };
+
+        let result = responses_to_chat(&req, &[], &config).unwrap();
+        let tool = &result.chat_request.tools.unwrap()[0];
+
+        assert_eq!(tool.function.name, "apply_patch");
+        assert!(
+            tool.function
+                .description
+                .as_deref()
+                .unwrap()
+                .contains("structured JSON")
+        );
+        assert!(tool.function.parameters.as_ref().unwrap()["properties"]["hunks"].is_object());
+        assert!(tool.function.parameters.as_ref().unwrap()["$defs"]["update_hunk"].is_object());
+    }
+
+    #[test]
     fn structured_output_json_object() {
         let req = ResponsesCreateRequest {
             model: "deepseek-v4-pro".into(),
@@ -423,6 +468,53 @@ mod tests {
     }
 
     #[test]
+    fn apply_patch_structured_history_uses_ast_arguments() {
+        let req = ResponsesCreateRequest {
+            model: "deepseek-v4-pro".into(),
+            input: ResponseInput::Items(vec![InputItem::CustomToolCall {
+                id: Some("fc_patch".into()),
+                call_id: "call_patch".into(),
+                name: "apply_patch".into(),
+                input: "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch"
+                    .into(),
+            }]),
+            instructions: None,
+            previous_response_id: None,
+            store: None,
+            stream: Some(false),
+            max_output_tokens: None,
+            temperature: None,
+            top_p: None,
+            tools: None,
+            tool_choice: None,
+            parallel_tool_calls: None,
+            reasoning: None,
+            text: None,
+            include: None,
+            metadata: None,
+        };
+        let config = MappingConfig {
+            apply_patch_upstream_tool_type: apply_patch_tool::APPLY_PATCH_UPSTREAM_STRUCTURED
+                .into(),
+            ..MappingConfig::default()
+        };
+
+        let result = responses_to_chat(&req, &[], &config).unwrap();
+        match &result.chat_request.messages[0] {
+            ChatMessage::Assistant {
+                tool_calls: Some(tool_calls),
+                ..
+            } => {
+                let args: serde_json::Value =
+                    serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
+                assert_eq!(args["hunks"][0]["kind"], "update");
+                assert_eq!(args["hunks"][0]["changes"][0]["lines"][0]["op"], "remove");
+            }
+            other => panic!("expected assistant custom tool call, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn chat_custom_function_call_maps_back_to_custom_tool_call() {
         let req = ResponsesCreateRequest {
             model: "deepseek-v4-pro".into(),
@@ -485,6 +577,91 @@ mod tests {
             &response.output[0],
             ResponseOutputItem::CustomToolCall { name, input, .. }
                 if name == "apply_patch" && input == "*** Begin Patch\n*** End Patch"
+        ));
+    }
+
+    #[test]
+    fn chat_structured_apply_patch_maps_back_to_custom_tool_call() {
+        let req = ResponsesCreateRequest {
+            model: "deepseek-v4-pro".into(),
+            input: ResponseInput::Text("edit".into()),
+            instructions: None,
+            previous_response_id: None,
+            store: None,
+            stream: Some(false),
+            max_output_tokens: None,
+            temperature: None,
+            top_p: None,
+            tools: Some(vec![ResponseTool::Custom {
+                name: "apply_patch".into(),
+                description: "Use apply_patch".into(),
+                format: custom_format(),
+            }]),
+            tool_choice: None,
+            parallel_tool_calls: None,
+            reasoning: None,
+            text: None,
+            include: None,
+            metadata: None,
+        };
+        let chat = ChatCompletionResponse {
+            id: "chat_1".into(),
+            object: "chat.completion".into(),
+            created: 1,
+            model: "deepseek-v4-pro".into(),
+            choices: Some(vec![ChatCompletionChoice {
+                index: 0,
+                message: ChatCompletionMessage {
+                    role: "assistant".into(),
+                    content: None,
+                    reasoning_content: None,
+                    tool_calls: Some(vec![ChatToolCall {
+                        id: "call_patch".into(),
+                        call_type: "function".into(),
+                        function: ChatFunctionCall {
+                            name: Some("apply_patch".into()),
+                            arguments: serde_json::json!({
+                                "hunks": [{
+                                    "kind": "update",
+                                    "path": "a.txt",
+                                    "changes": [{
+                                        "anchor": null,
+                                        "lines": [
+                                            {"op": "remove", "text": "old"},
+                                            {"op": "add", "text": "new"}
+                                        ],
+                                        "end_of_file": false
+                                    }]
+                                }]
+                            })
+                            .to_string(),
+                        },
+                    }]),
+                },
+                finish_reason: Some("tool_calls".into()),
+            }]),
+            usage: None,
+            system_fingerprint: None,
+        };
+
+        let response = response_mapper::map_chat_response_to_responses(
+            &chat,
+            "resp_1",
+            "out_1",
+            &req,
+            &MappingConfig {
+                apply_patch_upstream_tool_type: apply_patch_tool::APPLY_PATCH_UPSTREAM_STRUCTURED
+                    .into(),
+                ..MappingConfig::default()
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            &response.output[0],
+            ResponseOutputItem::CustomToolCall { name, input, .. }
+                if name == "apply_patch"
+                    && input == "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch"
         ));
     }
 

@@ -2,6 +2,7 @@ use protocol::chat::ChatCompletionRequest;
 use protocol::chat::ChatMessage;
 use protocol::responses::ResponsesCreateRequest;
 
+pub mod apply_patch_tool;
 pub mod custom_tools;
 pub mod error_mapper;
 pub mod input_mapper;
@@ -27,6 +28,8 @@ pub struct MappingConfig {
     pub native_responses_passthrough: bool,
     /// Provider kind string (for error messages / tracing)
     pub provider_kind: String,
+    /// How to expose Codex apply_patch custom tools to upstream Chat Completions.
+    pub apply_patch_upstream_tool_type: String,
 }
 
 impl Default for MappingConfig {
@@ -37,6 +40,7 @@ impl Default for MappingConfig {
             drop_sampling_params_when_thinking: false,
             native_responses_passthrough: false,
             provider_kind: "generic-openai-chat".into(),
+            apply_patch_upstream_tool_type: apply_patch_tool::APPLY_PATCH_UPSTREAM_FREEFORM.into(),
         }
     }
 }
@@ -86,6 +90,7 @@ pub fn responses_to_chat(
     // 3. Map input items → chat messages
     let input_msgs = input_mapper::map_input_to_messages(&req.input)?;
     messages.extend(input_msgs);
+    input_mapper::apply_chat_history_mapping_overrides(&mut messages, config)?;
 
     // 3a. Enforce tool call adjacency required by OpenAI/DeepSeek API
     protocol::canonical::enforce_tool_call_adjacency(&mut messages);
@@ -111,7 +116,7 @@ pub fn responses_to_chat(
         tools: req
             .tools
             .as_ref()
-            .map(|t| tool_mapper::map_response_tools(t)),
+            .map(|t| tool_mapper::map_response_tools(t, config)),
         tool_choice: req.tool_choice.as_ref().map(tool_mapper::map_tool_choice),
         parallel_tool_calls: req.parallel_tool_calls,
         response_format: structured_output_mapper::map_text_format(req.text.as_ref()),
@@ -139,14 +144,16 @@ pub fn responses_to_chat(
 pub fn responses_to_chat_via_canonical(
     canonical: &protocol::canonical::CanonicalRequest,
     caps: &protocol::provider_caps::ProviderCapabilities,
-    _config: &MappingConfig,
+    config: &MappingConfig,
 ) -> Result<MappedChatRequest, protocol::error::ApiError> {
     let response_id = format!("resp_{}", uuid::Uuid::new_v4());
     let item_id = format!("msg_{}", uuid::Uuid::new_v4());
     let warnings: Vec<String> = Vec::new();
 
     // Derive ChatCompletionRequest from canonical IR using real capabilities
-    let chat_request = canonical.into_chat_request(caps);
+    let mut chat_request = canonical.into_chat_request(caps);
+    tool_mapper::apply_chat_tool_mapping_overrides(&mut chat_request, config);
+    input_mapper::apply_chat_history_mapping_overrides(&mut chat_request.messages, config)?;
 
     Ok(MappedChatRequest {
         chat_request,

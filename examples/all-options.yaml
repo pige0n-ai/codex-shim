@@ -180,6 +180,12 @@ models:
       # through the model catalog. The only supported callable type is freeform.
       apply_patch_tool_type: freeform
 
+      # Optional upstream Chat Completions presentation for apply_patch.
+      # Keep apply_patch_tool_type as freeform for Codex; set this to structured
+      # to expose a JSON AST tool upstream and let the shim compile it back to
+      # Codex apply_patch syntax.
+      apply_patch_upstream_tool_type: structured
+
       # Whether Codex may send image detail = "original".
       supports_image_detail_original: false
 

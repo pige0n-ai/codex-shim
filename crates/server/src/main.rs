@@ -391,6 +391,7 @@ fn cmd_generate_catalog(
             supports_search_tool: Some(false),
             supports_reasoning_summaries: Some(false),
             apply_patch_tool_type: Some("freeform".to_string()),
+            apply_patch_upstream_tool_type: None,
             supports_image_detail_original: Some(false),
         }],
         &caps,
@@ -1277,6 +1278,9 @@ models:
     - slug: "{model_slug}"
       context_window: {context_window}
       apply_patch_tool_type: freeform{reasoning_levels_yaml}
+      # Optional: expose apply_patch to the upstream Chat Completions model as
+      # a structured JSON AST, while keeping Codex-facing apply_patch freeform.
+      # apply_patch_upstream_tool_type: structured
 
 state:
   backend: memory
@@ -1410,6 +1414,9 @@ models:
     - slug: "{model_slug}"
       context_window: {context_window}
       apply_patch_tool_type: freeform{reasoning_levels_yaml}
+      # Optional: expose apply_patch to the upstream Chat Completions model as
+      # a structured JSON AST, while keeping Codex-facing apply_patch freeform.
+      # apply_patch_upstream_tool_type: structured
 
 state:
   backend: memory
@@ -2504,6 +2511,7 @@ mod tests {
             supports_search_tool: Some(supports_search_tool),
             supports_reasoning_summaries: Some(false),
             apply_patch_tool_type: None,
+            apply_patch_upstream_tool_type: None,
             supports_image_detail_original: Some(false),
         }
     }

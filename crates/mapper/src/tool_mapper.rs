@@ -1,10 +1,12 @@
 use protocol::chat::{ChatFunctionDef, ChatTool};
 use protocol::responses::{ResponseInput, ResponseTool, ToolChoice};
 
+use crate::MappingConfig;
+use crate::apply_patch_tool;
 use crate::custom_tools::{custom_tool_description, custom_tool_schema};
 
 /// Map Responses tool definitions → Chat Completions tools.
-pub fn map_response_tools(tools: &[ResponseTool]) -> Vec<ChatTool> {
+pub fn map_response_tools(tools: &[ResponseTool], config: &MappingConfig) -> Vec<ChatTool> {
     tools
         .iter()
         .filter_map(|t| match t {
@@ -31,20 +33,66 @@ pub fn map_response_tools(tools: &[ResponseTool]) -> Vec<ChatTool> {
                 name,
                 description,
                 format,
-            } => Some(ChatTool {
-                tool_type: "function".into(),
-                function: ChatFunctionDef {
-                    name: name.clone(),
-                    description: Some(custom_tool_description(description, format)),
-                    parameters: Some(custom_tool_schema()),
-                    strict: Some(false),
-                },
-            }),
+            } => {
+                if name == apply_patch_tool::APPLY_PATCH_TOOL_NAME
+                    && config.apply_patch_upstream_tool_type
+                        == apply_patch_tool::APPLY_PATCH_UPSTREAM_STRUCTURED
+                {
+                    Some(ChatTool {
+                        tool_type: "function".into(),
+                        function: ChatFunctionDef {
+                            name: name.clone(),
+                            description: Some(apply_patch_tool::structured_description(
+                                description,
+                            )),
+                            parameters: Some(apply_patch_tool::structured_schema()),
+                            strict: Some(false),
+                        },
+                    })
+                } else {
+                    Some(ChatTool {
+                        tool_type: "function".into(),
+                        function: ChatFunctionDef {
+                            name: name.clone(),
+                            description: Some(custom_tool_description(description, format)),
+                            parameters: Some(custom_tool_schema()),
+                            strict: Some(false),
+                        },
+                    })
+                }
+            }
             ResponseTool::Mcp { .. }
             | ResponseTool::UnknownTool
             | ResponseTool::Namespace { .. } => None,
         })
         .collect()
+}
+
+pub fn apply_chat_tool_mapping_overrides(
+    chat_req: &mut protocol::chat::ChatCompletionRequest,
+    config: &MappingConfig,
+) {
+    if config.apply_patch_upstream_tool_type != apply_patch_tool::APPLY_PATCH_UPSTREAM_STRUCTURED {
+        return;
+    }
+    if let Some(tools) = &mut chat_req.tools {
+        for tool in tools {
+            if tool.function.name == apply_patch_tool::APPLY_PATCH_TOOL_NAME {
+                let original = tool
+                    .function
+                    .description
+                    .as_deref()
+                    .unwrap_or("")
+                    .split("\n\nChat adapter contract:")
+                    .next()
+                    .unwrap_or("");
+                tool.function.description =
+                    Some(apply_patch_tool::structured_description(original));
+                tool.function.parameters = Some(apply_patch_tool::structured_schema());
+                tool.function.strict = Some(false);
+            }
+        }
+    }
 }
 
 /// Map Responses `tool_choice` → Chat `tool_choice` value.
