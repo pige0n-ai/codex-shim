@@ -162,6 +162,8 @@ pub struct CatalogModelSpec {
     #[serde(default)]
     pub apply_patch_tool_type: Option<String>,
     #[serde(default)]
+    pub apply_patch_upstream_tool_type: Option<String>,
+    #[serde(default)]
     pub supports_image_detail_original: Option<bool>,
 }
 
@@ -348,6 +350,7 @@ mod context_window_tests {
             supports_search_tool: Some(false),
             supports_reasoning_summaries: Some(false),
             apply_patch_tool_type: None,
+            apply_patch_upstream_tool_type: None,
             supports_image_detail_original: Some(false),
         }
     }

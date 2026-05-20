@@ -4,6 +4,8 @@ use protocol::error::ApiError;
 use protocol::responses::{CustomToolFormat, ResponseTool};
 use serde_json::Value;
 
+use crate::apply_patch_tool;
+
 pub const CUSTOM_TOOL_INPUT_PROPERTY: &str = "input";
 
 pub fn custom_tool_names(tools: &[ResponseTool]) -> BTreeSet<String> {
@@ -46,6 +48,19 @@ Freeform format:\n\
 }
 
 pub fn custom_tool_input_from_arguments(name: &str, arguments: &str) -> Result<String, ApiError> {
+    if name == apply_patch_tool::APPLY_PATCH_TOOL_NAME {
+        let value: Value = serde_json::from_str(arguments).map_err(|error| {
+            ApiError::upstream_error(format!(
+                "custom tool '{name}' returned invalid arguments: expected JSON object: {error}"
+            ))
+        })?;
+        if value.get(CUSTOM_TOOL_INPUT_PROPERTY).is_none()
+            && (value.get("hunks").is_some() || value.get("raw_patch").is_some())
+        {
+            return apply_patch_tool::structured_arguments_to_patch(arguments);
+        }
+    }
+
     let value: Value = serde_json::from_str(arguments).map_err(|error| {
         ApiError::upstream_error(format!(
             "custom tool '{name}' returned invalid arguments: expected JSON object with string field '{CUSTOM_TOOL_INPUT_PROPERTY}': {error}"
@@ -74,6 +89,21 @@ pub fn custom_tool_input_from_arguments(name: &str, arguments: &str) -> Result<S
 
 pub fn custom_tool_arguments(input: &str) -> String {
     serde_json::json!({ CUSTOM_TOOL_INPUT_PROPERTY: input }).to_string()
+}
+
+pub fn custom_tool_arguments_for_upstream(
+    name: &str,
+    input: &str,
+    config: &crate::MappingConfig,
+) -> String {
+    if name == apply_patch_tool::APPLY_PATCH_TOOL_NAME
+        && config.apply_patch_upstream_tool_type
+            == apply_patch_tool::APPLY_PATCH_UPSTREAM_STRUCTURED
+    {
+        apply_patch_tool::structured_arguments_from_patch_input(input)
+    } else {
+        custom_tool_arguments(input)
+    }
 }
 
 #[cfg(test)]

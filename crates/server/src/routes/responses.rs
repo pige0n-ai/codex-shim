@@ -80,7 +80,7 @@ pub async fn create_response(
 
     let resolved_model = state.config.resolve_model(&req.model);
 
-    let mapping_config = build_mapping_config(&state);
+    let mapping_config = build_mapping_config(&state, &resolved_model);
 
     // Handle previous_response_id: only require local store for non-stateful upstreams
     let mut history_messages = Vec::new();
@@ -1229,12 +1229,21 @@ fn content_to_string(content: &protocol::chat::ChatContent) -> String {
             .join(""),
     }
 }
-fn build_mapping_config(state: &AppState) -> MappingConfig {
+fn build_mapping_config(state: &AppState, resolved_model: &str) -> MappingConfig {
     let caps = state.profile.capabilities();
     let is_chat_shim = matches!(
         caps.endpoint_mode,
         protocol::provider_caps::EndpointMode::ChatCompletionsShim
     );
+    let apply_patch_upstream_tool_type = state
+        .config
+        .models
+        .catalog
+        .iter()
+        .find(|model| model.slug == resolved_model)
+        .and_then(|model| model.apply_patch_upstream_tool_type.clone())
+        .unwrap_or_else(|| mapper::apply_patch_tool::APPLY_PATCH_UPSTREAM_FREEFORM.into());
+
     MappingConfig {
         thinking_enabled: is_chat_shim
             && !matches!(
@@ -1250,6 +1259,7 @@ fn build_mapping_config(state: &AppState) -> MappingConfig {
                 | protocol::provider_caps::EndpointMode::StatelessResponses
         ),
         provider_kind: state.profile.kind().to_string(),
+        apply_patch_upstream_tool_type,
     }
 }
 

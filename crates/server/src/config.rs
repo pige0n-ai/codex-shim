@@ -605,6 +605,7 @@ impl Config {
                 supports_search_tool: Some(false),
                 supports_reasoning_summaries: Some(false),
                 apply_patch_tool_type: Some("freeform".to_string()),
+                apply_patch_upstream_tool_type: None,
                 supports_image_detail_original: Some(false),
             }];
             tracing::info!(
@@ -678,6 +679,18 @@ impl Config {
                         "models.catalog entry '{}' has unsupported apply_patch_tool_type '{}'; only 'freeform' is supported",
                         model.slug,
                         apply_patch_tool_type
+                    );
+                }
+                if let Some(apply_patch_upstream_tool_type) = &model.apply_patch_upstream_tool_type
+                    && !matches!(
+                        apply_patch_upstream_tool_type.as_str(),
+                        "freeform" | "structured"
+                    )
+                {
+                    anyhow::bail!(
+                        "models.catalog entry '{}' has unsupported apply_patch_upstream_tool_type '{}'; supported values: 'freeform', 'structured'",
+                        model.slug,
+                        apply_patch_upstream_tool_type
                     );
                 }
             }
@@ -780,6 +793,7 @@ mod tests {
             supports_search_tool: Some(false),
             supports_reasoning_summaries: Some(false),
             apply_patch_tool_type: None,
+            apply_patch_upstream_tool_type: None,
             supports_image_detail_original: Some(false),
         }];
         config
@@ -861,6 +875,16 @@ mod tests {
         let err = config.validate().unwrap_err().to_string();
 
         assert!(err.contains("unsupported apply_patch_tool_type"));
+    }
+
+    #[test]
+    fn validate_rejects_unsupported_apply_patch_upstream_tool_type() {
+        let mut config = valid_config();
+        config.models.catalog[0].apply_patch_upstream_tool_type = Some("function".into());
+
+        let err = config.validate().unwrap_err().to_string();
+
+        assert!(err.contains("unsupported apply_patch_upstream_tool_type"));
     }
 
     #[test]

@@ -88,6 +88,7 @@ fn build_live_catalog_json_with_base_instructions(
             supports_search_tool: Some(false),
             supports_reasoning_summaries: Some(false),
             apply_patch_tool_type: None,
+            apply_patch_upstream_tool_type: None,
             supports_image_detail_original: Some(false),
         }],
         &caps,

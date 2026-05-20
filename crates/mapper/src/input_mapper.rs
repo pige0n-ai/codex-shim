@@ -4,7 +4,8 @@ use protocol::responses::{
     InputItem, InputMessageRole, MessageContent, ResponseInput, SummaryPart,
 };
 
-use crate::custom_tools::custom_tool_arguments;
+use crate::MappingConfig;
+use crate::custom_tools::{custom_tool_arguments, custom_tool_arguments_for_upstream};
 
 /// Check if the input contains any reasoning items.
 pub fn has_reasoning_item(input: &ResponseInput) -> bool {
@@ -102,6 +103,41 @@ pub fn map_input_to_messages(input: &ResponseInput) -> Result<Vec<ChatMessage>, 
             Ok(messages)
         }
     }
+}
+
+pub fn apply_chat_history_mapping_overrides(
+    messages: &mut [ChatMessage],
+    config: &MappingConfig,
+) -> Result<(), ApiError> {
+    for message in messages {
+        if let ChatMessage::Assistant {
+            tool_calls: Some(tool_calls),
+            ..
+        } = message
+        {
+            for tool_call in tool_calls {
+                let Some(name) = tool_call.function.name.as_deref() else {
+                    continue;
+                };
+                if name == crate::apply_patch_tool::APPLY_PATCH_TOOL_NAME
+                    && config.apply_patch_upstream_tool_type
+                        == crate::apply_patch_tool::APPLY_PATCH_UPSTREAM_STRUCTURED
+                {
+                    let value: serde_json::Value =
+                        serde_json::from_str(&tool_call.function.arguments).map_err(|error| {
+                            ApiError::upstream_error(format!(
+                                "failed to parse apply_patch history arguments: {error}"
+                            ))
+                        })?;
+                    if let Some(input) = value.get("input").and_then(serde_json::Value::as_str) {
+                        tool_call.function.arguments =
+                            custom_tool_arguments_for_upstream(name, input, config);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Convert a function_call_output value (string or array) to plain text.
