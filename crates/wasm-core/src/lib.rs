@@ -17,6 +17,7 @@ pub fn map_responses_request(request_json: &str, config_json: &str) -> Result<St
         drop_sampling_params_when_thinking: config.drop_sampling_params_when_thinking,
         native_responses_passthrough: config.native_responses_passthrough,
         provider_kind: config.provider_kind,
+        apply_patch_upstream_tool_type: config.apply_patch_upstream_tool_type,
     };
 
     let result = mapper::responses_to_chat(&req, &[], &mapping_config)
@@ -47,6 +48,7 @@ pub fn map_chat_response(
         drop_sampling_params_when_thinking: config.drop_sampling_params_when_thinking,
         native_responses_passthrough: config.native_responses_passthrough,
         provider_kind: config.provider_kind,
+        apply_patch_upstream_tool_type: config.apply_patch_upstream_tool_type,
     };
 
     let response_id = format!("resp_{}", uuid::Uuid::new_v4());
@@ -100,10 +102,16 @@ struct WasmMappingConfig {
     native_responses_passthrough: bool,
     #[serde(default = "default_provider_kind")]
     provider_kind: String,
+    #[serde(default = "default_apply_patch_upstream_tool_type")]
+    apply_patch_upstream_tool_type: String,
 }
 
 fn default_provider_kind() -> String {
     "generic-openai-chat".into()
+}
+
+fn default_apply_patch_upstream_tool_type() -> String {
+    mapper::apply_patch_tool::APPLY_PATCH_UPSTREAM_FREEFORM.into()
 }
 
 #[derive(Serialize, Deserialize)]
