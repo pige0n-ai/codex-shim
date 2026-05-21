@@ -29,6 +29,7 @@ upstream:
   timeout_seconds: 900
   connect_timeout_seconds: 30
   max_retries: 2
+  stream_max_retries: 2
 
 provider:
   kind: deepseek-chat

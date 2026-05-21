@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::common::Usage;
+use crate::error::ApiErrorBody;
 use crate::responses::ResponseOutputItem;
 
 /// All SSE events the adapter can emit on a Responses stream.
@@ -106,6 +107,8 @@ pub struct SseResponseShell {
     pub usage: Option<Usage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_response_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ApiErrorBody>,
 }
 
 impl SseResponseShell {
@@ -120,6 +123,7 @@ impl SseResponseShell {
             output_text: None,
             usage: None,
             previous_response_id: None,
+            error: None,
         }
     }
 }

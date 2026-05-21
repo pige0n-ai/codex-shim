@@ -1061,6 +1061,122 @@ async fn direct_chat_stream_basic() {
     drop(mock);
 }
 
+#[tokio::test]
+async fn direct_chat_stream_retries_initial_429() {
+    let mock = MockUpstream::start(Scenario::ChatStream429ThenText {
+        failures: 1,
+        deltas: vec!["after_".into(), "retry".into()],
+        model: "mock-model".into(),
+    })
+    .await
+    .unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path =
+        generate_shim_config(tmp.path(), &mock.base_url(), "deepseek-chat", "mock-model").unwrap();
+    let mut config = std::fs::read_to_string(&config_path).unwrap();
+    config = config.replace(
+        "  max_retries: 0",
+        "  max_retries: 0\n  stream_max_retries: 1",
+    );
+    std::fs::write(&config_path, config).unwrap();
+    let shim = ShimProcess::start(&config_path).await.unwrap();
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{}/responses", shim.base_url()))
+        .bearer_auth("local-shim-test-token")
+        .json(&serde_json::json!({
+            "model": "mock-model",
+            "input": "Hello",
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(resp.status().is_success());
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("after_retry"), "stream body: {body}");
+    assert_eq!(
+        mock.state.take_requests().len(),
+        2,
+        "first 429 should be retried once before streaming to the client"
+    );
+
+    drop(shim);
+    drop(mock);
+}
+
+#[tokio::test]
+async fn direct_chat_stream_mapper_failure_persists_debug_artifact() {
+    let mock = MockUpstream::start(Scenario::ChatStreamToolCall {
+        tool_name: "apply_patch".into(),
+        tool_args: serde_json::json!({}),
+        text_before: String::new(),
+        model: "mock-model".into(),
+    })
+    .await
+    .unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path =
+        generate_shim_config(tmp.path(), &mock.base_url(), "deepseek-chat", "mock-model").unwrap();
+    let shim = ShimProcess::start(&config_path).await.unwrap();
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{}/responses", shim.base_url()))
+        .bearer_auth("local-shim-test-token")
+        .json(&serde_json::json!({
+            "model": "mock-model",
+            "input": "Hello",
+            "stream": true,
+            "tools": [{
+                "type": "custom",
+                "name": "apply_patch",
+                "description": "edit files",
+                "format": {
+                    "type": "grammar",
+                    "syntax": "lark",
+                    "definition": "start: /.+/"
+                }
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(resp.status().is_success());
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("response.failed"), "stream body: {body}");
+    assert!(
+        body.contains("expected exactly one string field"),
+        "stream body should expose mapper error: {body}"
+    );
+
+    let debug_resp = client
+        .get(format!("{}/debug/responses", shim.base_url()))
+        .bearer_auth("local-shim-test-token")
+        .send()
+        .await
+        .unwrap();
+    assert!(debug_resp.status().is_success());
+    let artifacts: serde_json::Value = debug_resp.json().await.unwrap();
+    let first = artifacts
+        .as_array()
+        .and_then(|items| items.first())
+        .expect("expected a debug artifact");
+    assert_eq!(first["status"], "failed");
+    assert!(
+        first["response_sse_events"]
+            .to_string()
+            .contains("response.failed"),
+        "debug artifact should include failed SSE events: {first:#?}"
+    );
+
+    drop(shim);
+    drop(mock);
+}
+
 // ── I. Upstream 401 handling ─────────────────────────────────────
 
 #[tokio::test]

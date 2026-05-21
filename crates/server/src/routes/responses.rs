@@ -12,11 +12,12 @@ use protocol::responses::ResponsesCreateRequest;
 use protocol::sse::ResponseSseEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::time::Duration;
 
 use crate::AppState;
 use crate::config::{ReasoningSettings, SamplingConfig};
 use crate::sse_writer;
-use crate::store::{DebugArtifact, DebugArtifactView, ResponseState};
+use crate::store::{DebugArtifact, DebugArtifactView, ResponseState, ResponseStore};
 
 pub async fn create_response(
     State(state): State<AppState>,
@@ -310,17 +311,61 @@ async fn handle_stream(
     }
     state.profile.pre_send(&mut chat_req);
 
-    let request_builder = state
-        .upstream
-        .build_request(reqwest::Method::POST, &state.config.upstream.chat_path)
-        .await
-        .map_err(record_error)?;
+    let request_json = to_json_value("Responses request", &_req).map_err(&record_error)?;
+    let mapped_request_json =
+        to_json_value("mapped Chat request", &chat_req).map_err(&record_error)?;
 
-    let upstream_resp = request_builder
-        .json(&chat_req)
-        .send()
-        .await
-        .map_err(|e| record_error(ApiError::upstream_error(format!("{e}"))))?;
+    let mut attempt = 0;
+    let pre_stream_max_retries = state.config.upstream.pre_stream_max_retries();
+    let upstream_resp = loop {
+        let request_builder = state
+            .upstream
+            .build_request(reqwest::Method::POST, &state.config.upstream.chat_path)
+            .await
+            .map_err(record_error)?;
+
+        match request_builder.json(&chat_req).send().await {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                if is_retryable_upstream_status(status) && attempt < pre_stream_max_retries {
+                    attempt += 1;
+                    let retry_after = retry_after_delay(resp.headers());
+                    let body = resp.text().await.unwrap_or_default();
+                    let delay = retry_after.unwrap_or_else(|| retry_delay(attempt));
+                    tracing::warn!(
+                        %status,
+                        %attempt,
+                        max_retries = %pre_stream_max_retries,
+                        ?delay,
+                        %body,
+                        "Retrying upstream streaming request before relaying SSE after retryable status"
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                break resp;
+            }
+            Err(error) => {
+                if error.is_timeout() {
+                    return Err(record_error(ApiError::upstream_timeout()));
+                }
+                if attempt < pre_stream_max_retries {
+                    attempt += 1;
+                    let delay = retry_delay(attempt);
+                    tracing::warn!(
+                        %error,
+                        %attempt,
+                        max_retries = %pre_stream_max_retries,
+                        ?delay,
+                        "Retrying upstream streaming request before relaying SSE after transport error"
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                return Err(record_error(ApiError::upstream_error(format!("{error}"))));
+            }
+        }
+    };
 
     let status = upstream_resp.status().as_u16();
     tracing::info!(%status, "Upstream response status");
@@ -329,9 +374,6 @@ async fn handle_stream(
         tracing::warn!(%status, %body, "Upstream error response");
         let upstream_error = serde_json::from_str::<serde_json::Value>(&body)
             .unwrap_or_else(|_| serde_json::json!({ "body": body.clone() }));
-        let request_json = to_json_value("Responses request", &_req).map_err(&record_error)?;
-        let mapped_request_json =
-            to_json_value("mapped Chat request", &chat_req).map_err(&record_error)?;
         let created_at = chrono::Utc::now().timestamp();
         persist_response_state(
             &state,
@@ -387,6 +429,7 @@ async fn handle_stream(
     let req_json = to_json_value("Responses request", &_req).map_err(&record_error)?;
     let sent_messages = chat_req.messages.clone();
     let previous_response_id = _req.previous_response_id.clone();
+    let mapped_request_json_for_store = mapped_request_json.clone();
 
     // Spawn task to read upstream SSE and convert to Response events
     tokio::spawn(async move {
@@ -423,24 +466,27 @@ async fn handle_stream(
                         let events = match stream_state.complete() {
                             Ok(events) => events,
                             Err(error) => {
-                                let failed = ResponseSseEvent::ResponseFailed {
-                                    response: {
-                                        let mut response = protocol::sse::SseResponseShell::minimal(
-                                            response_id.clone(),
-                                            model.clone(),
-                                            created_at,
-                                        );
-                                        response.status = "failed".into();
-                                        response
-                                    },
-                                };
-                                let error_event = ResponseSseEvent::Error { error: error.error };
-                                for event in [error_event, failed] {
-                                    if let Ok(event_json) = sse_event_to_value(&event) {
-                                        response_sse_events.push(event_json);
-                                    }
-                                    let _ = tx.send(Ok(event)).await;
-                                }
+                                emit_stream_failure(
+                                    &tx,
+                                    &mut response_sse_events,
+                                    response_id.clone(),
+                                    model.clone(),
+                                    created_at,
+                                    error,
+                                )
+                                .await;
+                                persist_stream_failure(
+                                    &store,
+                                    response_id,
+                                    model,
+                                    created_at,
+                                    req_json,
+                                    mapped_request_json_for_store,
+                                    previous_response_id,
+                                    sent_messages,
+                                    upstream_sse_events,
+                                    response_sse_events,
+                                );
                                 return;
                             }
                         };
@@ -510,20 +556,27 @@ async fn handle_stream(
                                     }
                                 }
                                 Err(e) => {
-                                    let event = ResponseSseEvent::Error { error: e.error };
-                                    let event_json = match sse_event_to_value(&event) {
-                                        Ok(value) => value,
-                                        Err(error) => {
-                                            let _ = tx
-                                                .send(Ok(ResponseSseEvent::Error {
-                                                    error: error.error,
-                                                }))
-                                                .await;
-                                            return;
-                                        }
-                                    };
-                                    response_sse_events.push(event_json);
-                                    let _ = tx.send(Ok(event)).await;
+                                    emit_stream_failure(
+                                        &tx,
+                                        &mut response_sse_events,
+                                        response_id.clone(),
+                                        model.clone(),
+                                        created_at,
+                                        e,
+                                    )
+                                    .await;
+                                    persist_stream_failure(
+                                        &store,
+                                        response_id,
+                                        model,
+                                        created_at,
+                                        req_json,
+                                        mapped_request_json_for_store,
+                                        previous_response_id,
+                                        sent_messages,
+                                        upstream_sse_events,
+                                        response_sse_events,
+                                    );
                                     return;
                                 }
                             }
@@ -534,20 +587,27 @@ async fn handle_stream(
                     }
                 }
                 Err(_e) => {
-                    let event = ResponseSseEvent::Error {
-                        error: ApiError::stream_interrupted().error,
-                    };
-                    let event_json = match sse_event_to_value(&event) {
-                        Ok(value) => value,
-                        Err(error) => {
-                            let _ = tx
-                                .send(Ok(ResponseSseEvent::Error { error: error.error }))
-                                .await;
-                            return;
-                        }
-                    };
-                    response_sse_events.push(event_json);
-                    let _ = tx.send(Ok(event)).await;
+                    emit_stream_failure(
+                        &tx,
+                        &mut response_sse_events,
+                        response_id.clone(),
+                        model.clone(),
+                        created_at,
+                        ApiError::stream_interrupted(),
+                    )
+                    .await;
+                    persist_stream_failure(
+                        &store,
+                        response_id,
+                        model,
+                        created_at,
+                        req_json,
+                        mapped_request_json_for_store,
+                        previous_response_id,
+                        sent_messages,
+                        upstream_sse_events,
+                        response_sse_events,
+                    );
                     return;
                 }
             }
@@ -598,21 +658,6 @@ async fn handle_stream(
         let debug_annotations = debug_annotations_for_request(&req_json);
 
         // Save to store for previous_response_id support
-        let mapped_request_json = match serde_json::to_value(&chat_req) {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::error!(%error, "Failed to serialize mapped Chat request");
-                let _ = tx
-                    .send(Ok(ResponseSseEvent::Error {
-                        error: ApiError::internal(format!(
-                            "failed to serialize mapped Chat request: {error}"
-                        ))
-                        .error,
-                    }))
-                    .await;
-                return;
-            }
-        };
         if let Err(error) = store.put_response_state(ResponseState {
             conversation_id: None,
             id: response_id.clone(),
@@ -641,7 +686,7 @@ async fn handle_stream(
             created_at,
             status: "completed".into(),
             request_json: req_json,
-            mapped_request_json,
+            mapped_request_json: mapped_request_json_for_store,
             upstream_error: None,
             debug_annotations,
             upstream_sse_events,
@@ -666,6 +711,104 @@ async fn handle_stream(
     let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
     let sse = sse_writer::sse_response(rx_stream);
     Ok(sse.into_response())
+}
+
+async fn emit_stream_failure(
+    tx: &tokio::sync::mpsc::Sender<Result<ResponseSseEvent, std::convert::Infallible>>,
+    response_sse_events: &mut Vec<serde_json::Value>,
+    response_id: String,
+    model: String,
+    created_at: i64,
+    error: ApiError,
+) {
+    let error_body = error.error;
+    let error_event = ResponseSseEvent::Error {
+        error: error_body.clone(),
+    };
+    let failed = ResponseSseEvent::ResponseFailed {
+        response: {
+            let mut response =
+                protocol::sse::SseResponseShell::minimal(response_id, model, created_at);
+            response.status = "failed".into();
+            response.error = Some(error_body);
+            response
+        },
+    };
+
+    for event in [error_event, failed] {
+        if let Ok(event_json) = sse_event_to_value(&event) {
+            response_sse_events.push(event_json);
+        }
+        let _ = tx.send(Ok(event)).await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_stream_failure(
+    store: &ResponseStore,
+    response_id: String,
+    model: String,
+    created_at: i64,
+    request_json: serde_json::Value,
+    mapped_request_json: serde_json::Value,
+    previous_response_id: Option<String>,
+    canonical_messages: Vec<protocol::chat::ChatMessage>,
+    upstream_sse_events: Vec<serde_json::Value>,
+    response_sse_events: Vec<serde_json::Value>,
+) {
+    let debug_annotations = debug_annotations_for_request(&request_json);
+    let response_json = response_sse_events
+        .iter()
+        .rev()
+        .find(|event| event.get("type").and_then(Value::as_str) == Some("response.failed"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    if let Err(error) = store.put_response_state(ResponseState {
+        conversation_id: None,
+        id: response_id.clone(),
+        model: model.clone(),
+        created_at,
+        status: "failed".into(),
+        response_json,
+        previous_response_id,
+        canonical_messages,
+    }) {
+        tracing::error!(%error, "Failed to persist failed streamed response state");
+    }
+
+    if let Err(error) = store.put_debug_artifact(DebugArtifact {
+        conversation_id: None,
+        id: response_id,
+        model,
+        created_at,
+        status: "failed".into(),
+        request_json,
+        mapped_request_json,
+        upstream_error: response_sse_events
+            .iter()
+            .rev()
+            .find_map(|event| event.get("error").cloned())
+            .map(|error| serde_json::json!({ "stream_error": error })),
+        debug_annotations,
+        upstream_sse_events,
+        response_sse_events,
+    }) {
+        tracing::error!(%error, "Failed to persist failed streamed debug artifact");
+    }
+}
+
+fn is_retryable_upstream_status(status: u16) -> bool {
+    status == 429 || (500..600).contains(&status)
+}
+
+fn retry_delay(attempt: u32) -> Duration {
+    Duration::from_secs(2u64.saturating_pow(attempt.min(6)))
+}
+
+fn retry_after_delay(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let raw = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    raw.parse::<u64>().ok().map(Duration::from_secs)
 }
 
 pub async fn get_response(
