@@ -23,7 +23,7 @@ pub fn structured_schema() -> Value {
             },
             "raw_patch": {
                 "type": "string",
-                "description": "Optional escape hatch. If present, it must be a complete Codex apply_patch payload including Begin Patch and End Patch markers. Prefer hunks."
+                "description": "A complete Codex apply_patch payload including Begin Patch and End Patch markers."
             }
         },
         "additionalProperties": false,
@@ -103,8 +103,10 @@ pub fn structured_description(original_description: &str) -> String {
     format!(
         "{original_description}\n\n\
 Chat adapter contract: this upstream tool uses structured JSON. The shim will compile the JSON AST into the raw Codex apply_patch payload before returning it to Codex.\n\n\
-Use `hunks` for normal edits. Do not include `*** Begin Patch`, `*** End Patch`, line-prefix characters, or unified diff headers in the JSON fields; the shim writes those markers. \
-For update changes, each line object uses `op`: `context`, `remove`, or `add`. `anchor` is literal text after `@@`, not a line range. Set `end_of_file` only when the change must match the physical end of the file."
+Use `hunks` for normal edits. Include `raw_patch` as a fallback whenever practical; if the structured AST is invalid and `raw_patch` is a non-empty string, the shim will pass `raw_patch` through to Codex apply_patch unchanged. \
+The `raw_patch` value is Codex apply_patch grammar, not unified diff: it must include `*** Begin Patch` and `*** End Patch`, and file headers must be `*** Add File: ...`, `*** Delete File: ...`, or `*** Update File: ...`.\n\n\
+Do not include `*** Begin Patch`, `*** End Patch`, line-prefix characters, or unified diff headers in the JSON AST fields; the shim writes those markers from `hunks`. \
+For update changes, each line object uses `op`: `context`, `remove`, or `add`. `anchor` is literal text after `@@`, not a line range such as `@@ -1,2 +1,2 @@`. Set `end_of_file` only when the change must match the physical end of the file."
     )
 }
 
@@ -121,20 +123,20 @@ pub fn structured_arguments_to_patch(arguments: &str) -> Result<String, ApiError
             "apply_patch returned invalid structured arguments: {error}"
         ))
     })?;
-    if let Some(raw_patch) = value.get("raw_patch").and_then(Value::as_str) {
-        if value.get("hunks").is_some() {
-            return Err(ApiError::upstream_error(
-                "apply_patch structured arguments must not include both 'hunks' and 'raw_patch'",
-            ));
-        }
-        return Ok(raw_patch.to_string());
+    let raw_patch = non_empty_raw_patch(&value);
+    let ast_result = serde_json::from_value::<StructuredPatch>(value)
+        .map_err(|error| {
+            ApiError::upstream_error(format!(
+                "apply_patch returned invalid structured arguments: {error}"
+            ))
+        })
+        .and_then(|patch| compile_structured_patch(&patch));
+    match ast_result {
+        Ok(patch) => Ok(patch),
+        Err(error) => raw_patch.ok_or_else(|| {
+            ApiError::upstream_error(format!("{error}; include a non-empty raw_patch fallback"))
+        }),
     }
-    let patch: StructuredPatch = serde_json::from_value(value).map_err(|error| {
-        ApiError::upstream_error(format!(
-            "apply_patch returned invalid structured arguments: {error}"
-        ))
-    })?;
-    compile_structured_patch(&patch)
 }
 
 #[derive(Debug, Deserialize)]
@@ -170,6 +172,15 @@ struct Change {
 struct ChangeLine {
     op: ChangeOp,
     text: String,
+}
+
+fn non_empty_raw_patch(value: &Value) -> Option<String> {
+    let raw_patch = value.get("raw_patch")?.as_str()?;
+    if raw_patch.is_empty() {
+        None
+    } else {
+        Some(raw_patch.to_string())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -359,6 +370,7 @@ mod tests {
     #[test]
     fn compiles_structured_patch_to_raw_patch() {
         let args = serde_json::json!({
+            "raw_patch": "*** Begin Patch\n*** Delete File: fallback.txt\n*** End Patch",
             "hunks": [
                 {"kind": "add", "path": "a.txt", "lines": ["one", "two"]},
                 {"kind": "update", "path": "b.txt", "move_to": null, "changes": [{
@@ -378,6 +390,68 @@ mod tests {
             patch.contains("*** Update File: b.txt\n@@\n fn main() {\n-    old();\n+    new();\n")
         );
         assert!(patch.ends_with("*** End Patch"));
+    }
+
+    #[test]
+    fn structured_patch_uses_raw_patch_when_ast_is_invalid() {
+        let raw = "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch";
+        let args = serde_json::json!({
+            "raw_patch": raw,
+            "hunks": [{
+                "path": "a.txt",
+                "changes": [{
+                    "anchor": null,
+                    "lines": [{"op": "add", "text": "new"}]
+                }]
+            }]
+        });
+
+        assert_eq!(
+            structured_arguments_to_patch(&args.to_string()).unwrap(),
+            raw
+        );
+    }
+
+    #[test]
+    fn structured_patch_rejects_invalid_ast_without_raw_patch() {
+        let args = serde_json::json!({
+            "hunks": [{
+                "path": "a.txt",
+                "changes": [{
+                    "anchor": null,
+                    "lines": [{"op": "add", "text": "new"}]
+                }]
+            }]
+        });
+
+        let error = structured_arguments_to_patch(&args.to_string()).unwrap_err();
+        assert!(error.to_string().contains("missing field `kind`"));
+        assert!(
+            error
+                .to_string()
+                .contains("include a non-empty raw_patch fallback")
+        );
+    }
+
+    #[test]
+    fn structured_patch_rejects_invalid_ast_with_empty_raw_patch() {
+        let args = serde_json::json!({
+            "raw_patch": "",
+            "hunks": [{
+                "path": "a.txt",
+                "changes": [{
+                    "anchor": null,
+                    "lines": [{"op": "add", "text": "new"}]
+                }]
+            }]
+        });
+
+        let error = structured_arguments_to_patch(&args.to_string()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("include a non-empty raw_patch fallback")
+        );
     }
 
     #[test]
