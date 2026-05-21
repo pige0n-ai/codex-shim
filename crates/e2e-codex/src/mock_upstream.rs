@@ -37,6 +37,13 @@ pub enum Scenario {
         #[serde(default = "default_model")]
         model: String,
     },
+    /// Chat stream: returns 429 for the first N requests, then streams deltas.
+    ChatStream429ThenText {
+        failures: usize,
+        deltas: Vec<String>,
+        #[serde(default = "default_model")]
+        model: String,
+    },
     /// Chat stream with a tool call.
     ChatStreamToolCall {
         tool_name: String,
@@ -182,7 +189,11 @@ async fn chat_completions(
             .collect(),
         body: body.clone(),
     };
-    state.requests.lock().unwrap().push(captured);
+    let request_number = {
+        let mut requests = state.requests.lock().unwrap();
+        requests.push(captured);
+        requests.len()
+    };
 
     let scenario = state.scenario.lock().unwrap().clone();
     let stream = body
@@ -211,7 +222,26 @@ async fn chat_completions(
         Scenario::ChatStreamText { deltas, model } if stream => {
             sse_chat_stream(deltas, model)
         }
+        Scenario::ChatStream429ThenText {
+            failures,
+            deltas,
+            model,
+        } if stream => {
+            if request_number <= *failures {
+                (
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    [("retry-after", "0")],
+                    Json(serde_json::json!({"error": {"message": "Rate limited", "type": "rate_limit_error", "code": "rate_limit_exceeded"}})),
+                )
+                    .into_response()
+            } else {
+                sse_chat_stream(deltas, model)
+            }
+        }
         Scenario::ChatStreamText { .. } => {
+            sse_chat_stream(&vec!["mock".into()], "mock-model")
+        }
+        Scenario::ChatStream429ThenText { .. } => {
             sse_chat_stream(&vec!["mock".into()], "mock-model")
         }
         Scenario::ChatStreamToolCall { tool_name, tool_args, text_before, model } if stream => {

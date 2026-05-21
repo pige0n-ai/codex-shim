@@ -1262,6 +1262,9 @@ upstream:
   chat_path: "{chat_path}"
   responses_path: "{responses_path}"
   api_key_env: "{api_key_env}"
+  # Retries only before any SSE has been sent to Codex. Mid-stream
+  # disconnects are returned as response.failed so Codex can retry the turn.
+  stream_max_retries: 2
 
 provider:
   kind: {profile_name}
@@ -1350,7 +1353,8 @@ fn generate_slim_config(
 
 upstream:
   base_url: "{url}"
-  api_key_env: "{api_key_env}""#,
+  api_key_env: "{api_key_env}"
+  stream_max_retries: 2"#,
         )
     } else {
         format!(
@@ -1358,7 +1362,8 @@ upstream:
   listen: "{listen_addr}"
 
 upstream:
-  api_key_env: "{api_key_env}""#,
+  api_key_env: "{api_key_env}"
+  stream_max_retries: 2"#,
         )
     };
 

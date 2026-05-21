@@ -45,6 +45,10 @@ upstream:
   timeout_seconds: 900
   connect_timeout_seconds: 30
   max_retries: 2
+  # Streaming request retries before codex-shim has emitted SSE to Codex.
+  # Once SSE is being relayed, codex-shim emits response.failed on disconnect
+  # and leaves turn-level retry to Codex. Defaults to max_retries when omitted.
+  stream_max_retries: 2
 
 provider:
   # Built-in shim profile preset. This controls how codex-shim talks to the

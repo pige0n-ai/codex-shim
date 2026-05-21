@@ -112,6 +112,24 @@ upstream:
     args: ["--audience", "codex"]
 ```
 
+### Retry Boundaries
+
+```yaml
+upstream:
+  max_retries: 2
+  stream_max_retries: 2
+```
+
+`max_retries` covers ordinary upstream requests and non-streaming chat calls.
+`stream_max_retries` covers streaming chat-completions requests only until the
+shim has started relaying SSE to Codex. It defaults to `max_retries` when
+omitted.
+
+After SSE is already being relayed, codex-shim does not retry or resume a
+partial upstream stream. It emits `error` plus `response.failed`; Codex then
+uses its native turn-level stream retry to rebuild and re-run the sampling
+request from the conversation history it has already committed.
+
 ## Server & Listen Address
 
 ```yaml

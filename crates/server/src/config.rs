@@ -219,8 +219,15 @@ pub struct UpstreamConfig {
     pub timeout_seconds: u64,
     #[serde(default = "default_connect_timeout")]
     pub connect_timeout_seconds: u64,
+    /// Retries for ordinary upstream requests and non-streaming chat calls.
     #[serde(default)]
     pub max_retries: u32,
+    /// Retries for streaming chat-completions requests before codex-shim has
+    /// emitted any SSE to Codex. Once a stream is already being relayed, the
+    /// shim emits response.failed and lets Codex's native stream retry loop
+    /// re-run the sampling request.
+    #[serde(default)]
+    pub stream_max_retries: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -407,7 +414,14 @@ impl Default for UpstreamConfig {
             timeout_seconds: default_timeout(),
             connect_timeout_seconds: default_connect_timeout(),
             max_retries: 2,
+            stream_max_retries: None,
         }
+    }
+}
+
+impl UpstreamConfig {
+    pub fn pre_stream_max_retries(&self) -> u32 {
+        self.stream_max_retries.unwrap_or(self.max_retries)
     }
 }
 
@@ -519,6 +533,16 @@ impl Config {
         }
         if let Ok(v) = std::env::var("CODEX_SHIM_UPSTREAM__CHAT_PATH") {
             config.upstream.chat_path = v;
+        }
+        if let Ok(v) = std::env::var("CODEX_SHIM_UPSTREAM__MAX_RETRIES")
+            && let Ok(parsed) = v.parse()
+        {
+            config.upstream.max_retries = parsed;
+        }
+        if let Ok(v) = std::env::var("CODEX_SHIM_UPSTREAM__STREAM_MAX_RETRIES")
+            && let Ok(parsed) = v.parse()
+        {
+            config.upstream.stream_max_retries = Some(parsed);
         }
         if let Ok(v) = std::env::var("CODEX_SHIM_PROVIDER__KIND") {
             config.provider.kind = v;
@@ -638,6 +662,13 @@ impl Config {
         }
         validate_optional_range("sampling.temperature", self.sampling.temperature, 0.0, 2.0)?;
         validate_optional_range("sampling.top_p", self.sampling.top_p, 0.0, 1.0)?;
+        if let Some(stream_max_retries) = self.upstream.stream_max_retries
+            && stream_max_retries > 100
+        {
+            anyhow::bail!(
+                "upstream.stream_max_retries must be between 0 and 100, got {stream_max_retries}"
+            );
+        }
         if let Some(profile_cfg) = &self.provider.profile_config
             && matches!(profile_cfg.profile.as_str(), "deepseek-chat" | "deepseek")
             && profile_cfg
