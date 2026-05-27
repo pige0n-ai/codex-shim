@@ -118,6 +118,7 @@ upstream:
 upstream:
   max_retries: 2
   stream_max_retries: 2
+  downstream_heartbeat_seconds: 30
 ```
 
 `max_retries` covers ordinary upstream requests and non-streaming chat calls.
@@ -129,6 +130,12 @@ After SSE is already being relayed, codex-shim does not retry or resume a
 partial upstream stream. It emits `error` plus `response.failed`; Codex then
 uses its native turn-level stream retry to rebuild and re-run the sampling
 request from the conversation history it has already committed.
+
+`downstream_heartbeat_seconds` sends a lightweight `response.in_progress` event
+when upstream SSE is active but the shim has not emitted a Responses event for
+that many seconds. This protects Codex from `idle timeout waiting for SSE` during
+reasoning-only chunks, usage-only chunks, and accumulated custom tool arguments.
+Set it to `0` to disable the heartbeat.
 
 ## Server & Listen Address
 

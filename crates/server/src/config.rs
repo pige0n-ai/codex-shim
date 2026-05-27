@@ -228,6 +228,11 @@ pub struct UpstreamConfig {
     /// re-run the sampling request.
     #[serde(default)]
     pub stream_max_retries: Option<u32>,
+    /// Send a lightweight Responses SSE progress event when upstream is active
+    /// but no downstream event has been emitted for this many seconds. Set to
+    /// 0 to disable.
+    #[serde(default = "default_downstream_heartbeat")]
+    pub downstream_heartbeat_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -352,6 +357,9 @@ fn default_timeout() -> u64 {
 fn default_connect_timeout() -> u64 {
     30
 }
+fn default_downstream_heartbeat() -> u64 {
+    30
+}
 fn default_provider_kind() -> String {
     "deepseek-chat".into()
 }
@@ -417,6 +425,7 @@ impl Default for UpstreamConfig {
             connect_timeout_seconds: default_connect_timeout(),
             max_retries: 2,
             stream_max_retries: None,
+            downstream_heartbeat_seconds: default_downstream_heartbeat(),
         }
     }
 }
@@ -874,6 +883,15 @@ mod tests {
     fn validate_accepts_zero_failed_debug_artifact_ttl_as_never_expire() {
         let mut config = valid_config();
         config.state.failed_debug_artifact_ttl_seconds = Some(0);
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn upstream_downstream_heartbeat_defaults_to_thirty_seconds_and_accepts_zero() {
+        assert_eq!(Config::default().upstream.downstream_heartbeat_seconds, 30);
+
+        let mut config = valid_config();
+        config.upstream.downstream_heartbeat_seconds = 0;
         config.validate().unwrap();
     }
 

@@ -1108,6 +1108,249 @@ async fn direct_chat_stream_retries_initial_429() {
 }
 
 #[tokio::test]
+async fn direct_chat_stream_reasoning_only_chunks_emit_downstream_heartbeat() {
+    let mock = MockUpstream::start(Scenario::ChatStreamReasoningChunks {
+        chunks: vec!["think-1".into(), "think-2".into()],
+        delay_ms: 1100,
+        model: "mock-model".into(),
+    })
+    .await
+    .unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path =
+        generate_shim_config(tmp.path(), &mock.base_url(), "deepseek-chat", "mock-model").unwrap();
+    let mut config = std::fs::read_to_string(&config_path).unwrap();
+    config = config.replace(
+        "  max_retries: 0",
+        "  max_retries: 0\n  downstream_heartbeat_seconds: 1",
+    );
+    std::fs::write(&config_path, config).unwrap();
+    let shim = ShimProcess::start(&config_path).await.unwrap();
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{}/responses", shim.base_url()))
+        .bearer_auth("local-shim-test-token")
+        .json(&serde_json::json!({
+            "model": "mock-model",
+            "input": "Hello",
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(resp.status().is_success());
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("\"type\":\"response.in_progress\""),
+        "stream body should contain heartbeat response.in_progress: {body}"
+    );
+    assert!(
+        body.contains("\"type\":\"response.completed\""),
+        "stream body should still complete: {body}"
+    );
+
+    let response_id = response_id_from_sse(&body);
+    let debug_resp = client
+        .get(format!("{}/responses/{response_id}/debug", shim.base_url()))
+        .bearer_auth("local-shim-test-token")
+        .send()
+        .await
+        .unwrap();
+    assert!(debug_resp.status().is_success());
+    let artifact: serde_json::Value = debug_resp.json().await.unwrap();
+    let annotations = artifact["debug_annotations"].to_string();
+    assert!(
+        annotations.contains("relay.heartbeat_event_count=2")
+            || annotations.contains("relay.heartbeat_event_count=1"),
+        "debug annotations should record heartbeat count: {artifact:#?}"
+    );
+    assert!(
+        annotations.contains("relay.zero_event_chunk_count="),
+        "debug annotations should record zero-event chunks: {artifact:#?}"
+    );
+
+    drop(shim);
+    drop(mock);
+}
+
+#[tokio::test]
+async fn direct_chat_stream_downstream_heartbeat_can_be_disabled() {
+    let mock = MockUpstream::start(Scenario::ChatStreamReasoningChunks {
+        chunks: vec!["think-1".into(), "think-2".into()],
+        delay_ms: 1100,
+        model: "mock-model".into(),
+    })
+    .await
+    .unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path =
+        generate_shim_config(tmp.path(), &mock.base_url(), "deepseek-chat", "mock-model").unwrap();
+    let mut config = std::fs::read_to_string(&config_path).unwrap();
+    config = config.replace(
+        "  max_retries: 0",
+        "  max_retries: 0\n  downstream_heartbeat_seconds: 0",
+    );
+    std::fs::write(&config_path, config).unwrap();
+    let shim = ShimProcess::start(&config_path).await.unwrap();
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{}/responses", shim.base_url()))
+        .bearer_auth("local-shim-test-token")
+        .json(&serde_json::json!({
+            "model": "mock-model",
+            "input": "Hello",
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(resp.status().is_success());
+    let body = resp.text().await.unwrap();
+    assert!(
+        !body.contains("\"type\":\"response.in_progress\""),
+        "heartbeat should be disabled: {body}"
+    );
+    assert!(
+        body.contains("\"type\":\"response.completed\""),
+        "stream body should still complete: {body}"
+    );
+
+    drop(shim);
+    drop(mock);
+}
+
+#[tokio::test]
+async fn direct_chat_stream_usage_only_chunk_can_emit_heartbeat_and_preserves_usage() {
+    let mock = MockUpstream::start(Scenario::ChatStreamTextThenDelayedUsage {
+        text: "hello".into(),
+        delay_ms: 1100,
+        model: "mock-model".into(),
+    })
+    .await
+    .unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path =
+        generate_shim_config(tmp.path(), &mock.base_url(), "deepseek-chat", "mock-model").unwrap();
+    let mut config = std::fs::read_to_string(&config_path).unwrap();
+    config = config.replace(
+        "  max_retries: 0",
+        "  max_retries: 0\n  downstream_heartbeat_seconds: 1",
+    );
+    std::fs::write(&config_path, config).unwrap();
+    let shim = ShimProcess::start(&config_path).await.unwrap();
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{}/responses", shim.base_url()))
+        .bearer_auth("local-shim-test-token")
+        .json(&serde_json::json!({
+            "model": "mock-model",
+            "input": "Hello",
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(resp.status().is_success());
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("\"type\":\"response.in_progress\""),
+        "usage-only chunk should be able to trigger heartbeat: {body}"
+    );
+    assert!(
+        body.contains("hello"),
+        "text delta should remain present: {body}"
+    );
+    assert!(
+        body.contains("\"total_tokens\":18"),
+        "final usage should be preserved: {body}"
+    );
+
+    drop(shim);
+    drop(mock);
+}
+
+#[tokio::test]
+async fn direct_chat_stream_custom_tool_argument_chunks_emit_heartbeat_without_partial_input() {
+    let raw_patch = "*** Begin Patch\n*** Add File: heartbeat.txt\n+ok\n*** End Patch";
+    let arguments = serde_json::json!({ "input": raw_patch }).to_string();
+    let split_at = arguments.len() / 2;
+    let mock = MockUpstream::start(Scenario::ChatStreamCustomToolArgumentChunks {
+        tool_name: "apply_patch".into(),
+        argument_chunks: vec![
+            arguments[..split_at].to_string(),
+            arguments[split_at..].to_string(),
+        ],
+        delay_ms: 1100,
+        model: "mock-model".into(),
+    })
+    .await
+    .unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path =
+        generate_shim_config(tmp.path(), &mock.base_url(), "deepseek-chat", "mock-model").unwrap();
+    let mut config = std::fs::read_to_string(&config_path).unwrap();
+    config = config.replace(
+        "  max_retries: 0",
+        "  max_retries: 0\n  downstream_heartbeat_seconds: 1",
+    );
+    std::fs::write(&config_path, config).unwrap();
+    let shim = ShimProcess::start(&config_path).await.unwrap();
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{}/responses", shim.base_url()))
+        .bearer_auth("local-shim-test-token")
+        .json(&serde_json::json!({
+            "model": "mock-model",
+            "input": "Hello",
+            "stream": true,
+            "tools": [{
+                "type": "custom",
+                "name": "apply_patch",
+                "description": "edit files",
+                "format": {
+                    "type": "grammar",
+                    "syntax": "lark",
+                    "definition": "start: /.+/"
+                }
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(resp.status().is_success());
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("\"type\":\"response.in_progress\""),
+        "stream body should contain heartbeat response.in_progress: {body}"
+    );
+    assert!(
+        body.contains("\"type\":\"response.custom_tool_call_input.delta\""),
+        "stream should include final custom tool input delta: {body}"
+    );
+    assert!(
+        body.contains("*** Begin Patch"),
+        "custom tool input should remain complete: {body}"
+    );
+    assert_eq!(
+        body.matches("\"type\":\"response.custom_tool_call_input.delta\"")
+            .count(),
+        1,
+        "custom tool input must only be emitted once complete: {body}"
+    );
+
+    drop(shim);
+    drop(mock);
+}
+
+#[tokio::test]
 async fn direct_chat_stream_mapper_failure_persists_debug_artifact() {
     let mock = MockUpstream::start(Scenario::ChatStreamToolCall {
         tool_name: "apply_patch".into(),

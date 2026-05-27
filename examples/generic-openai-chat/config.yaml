@@ -21,6 +21,7 @@ upstream:
   connect_timeout_seconds: 30
   max_retries: 2
   stream_max_retries: 2
+  downstream_heartbeat_seconds: 30
 
 provider:
   kind: generic-chat

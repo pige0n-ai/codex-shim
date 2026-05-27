@@ -12,7 +12,7 @@ use protocol::responses::ResponsesCreateRequest;
 use protocol::sse::ResponseSseEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::AppState;
 use crate::config::{ReasoningSettings, SamplingConfig};
@@ -439,6 +439,10 @@ async fn handle_stream(
     let sent_messages = chat_req.messages.clone();
     let previous_response_id = _req.previous_response_id.clone();
     let mapped_request_json_for_store = mapped_request_json.clone();
+    let heartbeat_interval = match state.config.upstream.downstream_heartbeat_seconds {
+        0 => None,
+        seconds => Some(Duration::from_secs(seconds)),
+    };
 
     // Spawn task to read upstream SSE and convert to Response events
     tokio::spawn(async move {
@@ -462,6 +466,7 @@ async fn handle_stream(
         let mut chunk_count: u64 = 0;
         let mut text_bytes: u64 = 0;
         let mut final_events: Option<Vec<ResponseSseEvent>> = None;
+        let mut relay_diagnostics = RelayDiagnostics::default();
 
         tracing::info!("Starting to read upstream SSE stream");
 
@@ -469,6 +474,7 @@ async fn handle_stream(
             match event_result {
                 Ok(event) => {
                     let data = event.data;
+                    relay_diagnostics.record_upstream(upstream_event_kind(&data));
 
                     if data == "[DONE]" {
                         upstream_sse_events.push(serde_json::json!({"data": "[DONE]"}));
@@ -478,6 +484,7 @@ async fn handle_stream(
                                 emit_stream_failure(
                                     &tx,
                                     &mut response_sse_events,
+                                    &mut relay_diagnostics,
                                     response_id.clone(),
                                     model.clone(),
                                     created_at,
@@ -495,6 +502,7 @@ async fn handle_stream(
                                     sent_messages,
                                     upstream_sse_events,
                                     response_sse_events,
+                                    &relay_diagnostics,
                                 );
                                 return;
                             }
@@ -506,11 +514,29 @@ async fn handle_stream(
                                     match to_json_value("completed SSE response", response) {
                                         Ok(value) => value,
                                         Err(error) => {
-                                            let _ = tx
-                                                .send(Ok(ResponseSseEvent::Error {
-                                                    error: error.error,
-                                                }))
-                                                .await;
+                                            emit_stream_failure(
+                                                &tx,
+                                                &mut response_sse_events,
+                                                &mut relay_diagnostics,
+                                                response_id.clone(),
+                                                model.clone(),
+                                                created_at,
+                                                error,
+                                            )
+                                            .await;
+                                            persist_stream_failure(
+                                                &store,
+                                                response_id,
+                                                model,
+                                                created_at,
+                                                req_json,
+                                                mapped_request_json_for_store,
+                                                previous_response_id,
+                                                sent_messages,
+                                                upstream_sse_events,
+                                                response_sse_events,
+                                                &relay_diagnostics,
+                                            );
                                             return;
                                         }
                                     };
@@ -518,13 +544,34 @@ async fn handle_stream(
                             let event_json = match sse_event_to_value(event) {
                                 Ok(value) => value,
                                 Err(error) => {
-                                    let _ = tx
-                                        .send(Ok(ResponseSseEvent::Error { error: error.error }))
-                                        .await;
+                                    emit_stream_failure(
+                                        &tx,
+                                        &mut response_sse_events,
+                                        &mut relay_diagnostics,
+                                        response_id.clone(),
+                                        model.clone(),
+                                        created_at,
+                                        error,
+                                    )
+                                    .await;
+                                    persist_stream_failure(
+                                        &store,
+                                        response_id,
+                                        model,
+                                        created_at,
+                                        req_json,
+                                        mapped_request_json_for_store,
+                                        previous_response_id,
+                                        sent_messages,
+                                        upstream_sse_events,
+                                        response_sse_events,
+                                        &relay_diagnostics,
+                                    );
                                     return;
                                 }
                             };
                             response_sse_events.push(event_json);
+                            relay_diagnostics.record_downstream(response_sse_event_type(event));
                         }
                         final_events = Some(events);
                         break;
@@ -546,21 +593,119 @@ async fn handle_stream(
                             }
                             match stream_state.process_chunk(&chunk) {
                                 Ok(events) => {
+                                    if events.is_empty() {
+                                        relay_diagnostics.record_zero_event_chunk();
+                                    }
                                     for event in events {
-                                        let event_json = match sse_event_to_value(&event) {
-                                            Ok(value) => value,
-                                            Err(error) => {
-                                                let _ = tx
-                                                    .send(Ok(ResponseSseEvent::Error {
-                                                        error: error.error,
-                                                    }))
-                                                    .await;
+                                        match send_response_event(
+                                            &tx,
+                                            &mut response_sse_events,
+                                            &mut relay_diagnostics,
+                                            event,
+                                        )
+                                        .await
+                                        {
+                                            Ok(true) => {}
+                                            Ok(false) => {
+                                                persist_client_disconnect_failure(
+                                                    &store,
+                                                    response_id,
+                                                    model,
+                                                    created_at,
+                                                    req_json,
+                                                    mapped_request_json_for_store,
+                                                    previous_response_id,
+                                                    sent_messages,
+                                                    upstream_sse_events,
+                                                    response_sse_events,
+                                                    &relay_diagnostics,
+                                                );
                                                 return;
                                             }
-                                        };
-                                        response_sse_events.push(event_json);
-                                        if tx.send(Ok(event)).await.is_err() {
-                                            return;
+                                            Err(error) => {
+                                                emit_stream_failure(
+                                                    &tx,
+                                                    &mut response_sse_events,
+                                                    &mut relay_diagnostics,
+                                                    response_id.clone(),
+                                                    model.clone(),
+                                                    created_at,
+                                                    error,
+                                                )
+                                                .await;
+                                                persist_stream_failure(
+                                                    &store,
+                                                    response_id,
+                                                    model,
+                                                    created_at,
+                                                    req_json,
+                                                    mapped_request_json_for_store,
+                                                    previous_response_id,
+                                                    sent_messages,
+                                                    upstream_sse_events,
+                                                    response_sse_events,
+                                                    &relay_diagnostics,
+                                                );
+                                                return;
+                                            }
+                                        }
+                                    }
+                                    if let Some(interval) = heartbeat_interval
+                                        && relay_diagnostics.heartbeat_due(interval)
+                                    {
+                                        match send_heartbeat(
+                                            &tx,
+                                            &mut response_sse_events,
+                                            &mut relay_diagnostics,
+                                            &response_id,
+                                            &model,
+                                            created_at,
+                                        )
+                                        .await
+                                        {
+                                            Ok(true) => {}
+                                            Ok(false) => {
+                                                persist_client_disconnect_failure(
+                                                    &store,
+                                                    response_id,
+                                                    model,
+                                                    created_at,
+                                                    req_json,
+                                                    mapped_request_json_for_store,
+                                                    previous_response_id,
+                                                    sent_messages,
+                                                    upstream_sse_events,
+                                                    response_sse_events,
+                                                    &relay_diagnostics,
+                                                );
+                                                return;
+                                            }
+                                            Err(error) => {
+                                                emit_stream_failure(
+                                                    &tx,
+                                                    &mut response_sse_events,
+                                                    &mut relay_diagnostics,
+                                                    response_id.clone(),
+                                                    model.clone(),
+                                                    created_at,
+                                                    error,
+                                                )
+                                                .await;
+                                                persist_stream_failure(
+                                                    &store,
+                                                    response_id,
+                                                    model,
+                                                    created_at,
+                                                    req_json,
+                                                    mapped_request_json_for_store,
+                                                    previous_response_id,
+                                                    sent_messages,
+                                                    upstream_sse_events,
+                                                    response_sse_events,
+                                                    &relay_diagnostics,
+                                                );
+                                                return;
+                                            }
                                         }
                                     }
                                 }
@@ -568,6 +713,7 @@ async fn handle_stream(
                                     emit_stream_failure(
                                         &tx,
                                         &mut response_sse_events,
+                                        &mut relay_diagnostics,
                                         response_id.clone(),
                                         model.clone(),
                                         created_at,
@@ -585,13 +731,73 @@ async fn handle_stream(
                                         sent_messages,
                                         upstream_sse_events,
                                         response_sse_events,
+                                        &relay_diagnostics,
                                     );
                                     return;
                                 }
                             }
                         }
                         Err(_) => {
+                            relay_diagnostics.record_unparseable();
                             tracing::debug!(%data, "Skipping unparseable SSE data");
+                            if let Some(interval) = heartbeat_interval
+                                && relay_diagnostics.heartbeat_due(interval)
+                            {
+                                match send_heartbeat(
+                                    &tx,
+                                    &mut response_sse_events,
+                                    &mut relay_diagnostics,
+                                    &response_id,
+                                    &model,
+                                    created_at,
+                                )
+                                .await
+                                {
+                                    Ok(true) => {}
+                                    Ok(false) => {
+                                        persist_client_disconnect_failure(
+                                            &store,
+                                            response_id,
+                                            model,
+                                            created_at,
+                                            req_json,
+                                            mapped_request_json_for_store,
+                                            previous_response_id,
+                                            sent_messages,
+                                            upstream_sse_events,
+                                            response_sse_events,
+                                            &relay_diagnostics,
+                                        );
+                                        return;
+                                    }
+                                    Err(error) => {
+                                        emit_stream_failure(
+                                            &tx,
+                                            &mut response_sse_events,
+                                            &mut relay_diagnostics,
+                                            response_id.clone(),
+                                            model.clone(),
+                                            created_at,
+                                            error,
+                                        )
+                                        .await;
+                                        persist_stream_failure(
+                                            &store,
+                                            response_id,
+                                            model,
+                                            created_at,
+                                            req_json,
+                                            mapped_request_json_for_store,
+                                            previous_response_id,
+                                            sent_messages,
+                                            upstream_sse_events,
+                                            response_sse_events,
+                                            &relay_diagnostics,
+                                        );
+                                        return;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -605,6 +811,7 @@ async fn handle_stream(
                     emit_stream_failure(
                         &tx,
                         &mut response_sse_events,
+                        &mut relay_diagnostics,
                         response_id.clone(),
                         model.clone(),
                         created_at,
@@ -622,6 +829,7 @@ async fn handle_stream(
                         sent_messages,
                         upstream_sse_events,
                         response_sse_events,
+                        &relay_diagnostics,
                     );
                     return;
                 }
@@ -670,7 +878,8 @@ async fn handle_stream(
             });
         }
 
-        let debug_annotations = debug_annotations_for_request(&req_json);
+        let debug_annotations =
+            debug_annotations_for_request_with_relay(&req_json, &relay_diagnostics);
 
         // Save to store for previous_response_id support
         if let Err(error) = store.put_response_state(ResponseState {
@@ -680,8 +889,8 @@ async fn handle_stream(
             created_at,
             status: "completed".into(),
             response_json: response_body,
-            previous_response_id,
-            canonical_messages: canonical,
+            previous_response_id: previous_response_id.clone(),
+            canonical_messages: canonical.clone(),
         }) {
             tracing::error!(%error, "Failed to persist streamed response state");
             let _ = tx
@@ -697,15 +906,15 @@ async fn handle_stream(
         if let Err(error) = store.put_debug_artifact(DebugArtifact {
             conversation_id: None,
             id: response_id.clone(),
-            model,
+            model: model.clone(),
             created_at,
             status: "completed".into(),
-            request_json: req_json,
-            mapped_request_json: mapped_request_json_for_store,
+            request_json: req_json.clone(),
+            mapped_request_json: mapped_request_json_for_store.clone(),
             upstream_error: None,
             debug_annotations,
-            upstream_sse_events,
-            response_sse_events,
+            upstream_sse_events: upstream_sse_events.clone(),
+            response_sse_events: response_sse_events.clone(),
         }) {
             tracing::error!(%error, "Failed to persist streamed debug artifact");
         }
@@ -717,6 +926,19 @@ async fn handle_stream(
         if let Some(events) = final_events {
             for event in events {
                 if tx.send(Ok(event)).await.is_err() {
+                    persist_client_disconnect_failure(
+                        &store,
+                        response_id,
+                        model,
+                        created_at,
+                        req_json,
+                        mapped_request_json_for_store,
+                        previous_response_id,
+                        canonical,
+                        upstream_sse_events,
+                        response_sse_events,
+                        &relay_diagnostics,
+                    );
                     return;
                 }
             }
@@ -728,14 +950,179 @@ async fn handle_stream(
     Ok(sse.into_response())
 }
 
+#[derive(Default)]
+struct RelayDiagnostics {
+    upstream_chunk_count: u64,
+    downstream_event_count: u64,
+    zero_event_chunk_count: u64,
+    unparseable_upstream_event_count: u64,
+    heartbeat_event_count: u64,
+    last_upstream_event_kind: Option<String>,
+    last_downstream_event_kind: Option<&'static str>,
+    last_downstream_event_at: Option<Instant>,
+}
+
+impl RelayDiagnostics {
+    fn record_upstream(&mut self, kind: String) {
+        self.upstream_chunk_count += 1;
+        self.last_upstream_event_kind = Some(kind);
+    }
+
+    fn record_zero_event_chunk(&mut self) {
+        self.zero_event_chunk_count += 1;
+    }
+
+    fn record_unparseable(&mut self) {
+        self.unparseable_upstream_event_count += 1;
+    }
+
+    fn record_downstream(&mut self, kind: &'static str) {
+        self.downstream_event_count += 1;
+        self.last_downstream_event_kind = Some(kind);
+        self.last_downstream_event_at = Some(Instant::now());
+    }
+
+    fn record_heartbeat(&mut self) {
+        self.heartbeat_event_count += 1;
+    }
+
+    fn heartbeat_due(&self, interval: Duration) -> bool {
+        let Some(last_downstream_event_at) = self.last_downstream_event_at else {
+            return false;
+        };
+        last_downstream_event_at.elapsed() >= interval
+    }
+
+    fn annotations(&self) -> Vec<String> {
+        let mut annotations = vec![
+            format!("relay.upstream_chunk_count={}", self.upstream_chunk_count),
+            format!(
+                "relay.downstream_event_count={}",
+                self.downstream_event_count
+            ),
+            format!(
+                "relay.zero_event_chunk_count={}",
+                self.zero_event_chunk_count
+            ),
+            format!(
+                "relay.unparseable_upstream_event_count={}",
+                self.unparseable_upstream_event_count
+            ),
+            format!("relay.heartbeat_event_count={}", self.heartbeat_event_count),
+        ];
+        if let Some(kind) = &self.last_upstream_event_kind {
+            annotations.push(format!("relay.last_upstream_event_kind={kind}"));
+        }
+        if let Some(kind) = self.last_downstream_event_kind {
+            annotations.push(format!("relay.last_downstream_event_kind={kind}"));
+        }
+        if let Some(last_downstream_event_at) = self.last_downstream_event_at {
+            annotations.push(format!(
+                "relay.last_downstream_event_elapsed_ms={}",
+                last_downstream_event_at.elapsed().as_millis()
+            ));
+        }
+        annotations
+    }
+}
+
+fn upstream_event_kind(data: &str) -> String {
+    if data == "[DONE]" {
+        return "done".into();
+    }
+    serde_json::from_str::<serde_json::Value>(data)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("object")
+                .or_else(|| value.get("type"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unparseable".into())
+}
+
+fn response_sse_event_type(event: &ResponseSseEvent) -> &'static str {
+    match event {
+        ResponseSseEvent::ResponseCreated { .. } => "response.created",
+        ResponseSseEvent::ResponseInProgress { .. } => "response.in_progress",
+        ResponseSseEvent::ResponseOutputItemAdded { .. } => "response.output_item.added",
+        ResponseSseEvent::ResponseContentPartAdded { .. } => "response.content_part.added",
+        ResponseSseEvent::ResponseOutputTextDelta { .. } => "response.output_text.delta",
+        ResponseSseEvent::ResponseOutputTextDone { .. } => "response.output_text.done",
+        ResponseSseEvent::ResponseContentPartDone { .. } => "response.content_part.done",
+        ResponseSseEvent::ResponseOutputItemDone { .. } => "response.output_item.done",
+        ResponseSseEvent::ResponseFunctionCallArgumentsDelta { .. } => {
+            "response.function_call_arguments.delta"
+        }
+        ResponseSseEvent::ResponseFunctionCallArgumentsDone { .. } => {
+            "response.function_call_arguments.done"
+        }
+        ResponseSseEvent::ResponseCustomToolCallInputDelta { .. } => {
+            "response.custom_tool_call_input.delta"
+        }
+        ResponseSseEvent::ResponseCompleted { .. } => "response.completed",
+        ResponseSseEvent::ResponseFailed { .. } => "response.failed",
+        ResponseSseEvent::Error { .. } => "error",
+    }
+}
+
 async fn emit_stream_failure(
     tx: &tokio::sync::mpsc::Sender<Result<ResponseSseEvent, std::convert::Infallible>>,
     response_sse_events: &mut Vec<serde_json::Value>,
+    diagnostics: &mut RelayDiagnostics,
     response_id: String,
     model: String,
     created_at: i64,
     error: ApiError,
 ) {
+    for event in stream_failure_events(response_id, model, created_at, error) {
+        let _ = send_response_event(tx, response_sse_events, diagnostics, event).await;
+    }
+}
+
+async fn send_heartbeat(
+    tx: &tokio::sync::mpsc::Sender<Result<ResponseSseEvent, std::convert::Infallible>>,
+    response_sse_events: &mut Vec<serde_json::Value>,
+    diagnostics: &mut RelayDiagnostics,
+    response_id: &str,
+    model: &str,
+    created_at: i64,
+) -> Result<bool, ApiError> {
+    diagnostics.record_heartbeat();
+    send_response_event(
+        tx,
+        response_sse_events,
+        diagnostics,
+        ResponseSseEvent::ResponseInProgress {
+            response: protocol::sse::SseResponseShell::minimal(
+                response_id.to_string(),
+                model.to_string(),
+                created_at,
+            ),
+        },
+    )
+    .await
+}
+
+async fn send_response_event(
+    tx: &tokio::sync::mpsc::Sender<Result<ResponseSseEvent, std::convert::Infallible>>,
+    response_sse_events: &mut Vec<serde_json::Value>,
+    diagnostics: &mut RelayDiagnostics,
+    event: ResponseSseEvent,
+) -> Result<bool, ApiError> {
+    let event_json = sse_event_to_value(&event)?;
+    diagnostics.record_downstream(response_sse_event_type(&event));
+    response_sse_events.push(event_json);
+    Ok(tx.send(Ok(event)).await.is_ok())
+}
+
+fn stream_failure_events(
+    response_id: String,
+    model: String,
+    created_at: i64,
+    error: ApiError,
+) -> [ResponseSseEvent; 2] {
     let error_body = error.error;
     let error_event = ResponseSseEvent::Error {
         error: error_body.clone(),
@@ -749,13 +1136,44 @@ async fn emit_stream_failure(
             response
         },
     };
+    [error_event, failed]
+}
 
-    for event in [error_event, failed] {
+#[allow(clippy::too_many_arguments)]
+fn persist_client_disconnect_failure(
+    store: &ResponseStore,
+    response_id: String,
+    model: String,
+    created_at: i64,
+    request_json: serde_json::Value,
+    mapped_request_json: serde_json::Value,
+    previous_response_id: Option<String>,
+    canonical_messages: Vec<protocol::chat::ChatMessage>,
+    upstream_sse_events: Vec<serde_json::Value>,
+    mut response_sse_events: Vec<serde_json::Value>,
+    diagnostics: &RelayDiagnostics,
+) {
+    let error = ApiError::stream_interrupted_with_details(
+        "downstream client disconnected while shim was relaying SSE",
+    );
+    for event in stream_failure_events(response_id.clone(), model.clone(), created_at, error) {
         if let Ok(event_json) = sse_event_to_value(&event) {
             response_sse_events.push(event_json);
         }
-        let _ = tx.send(Ok(event)).await;
     }
+    persist_stream_failure(
+        store,
+        response_id,
+        model,
+        created_at,
+        request_json,
+        mapped_request_json,
+        previous_response_id,
+        canonical_messages,
+        upstream_sse_events,
+        response_sse_events,
+        diagnostics,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -770,8 +1188,9 @@ fn persist_stream_failure(
     canonical_messages: Vec<protocol::chat::ChatMessage>,
     upstream_sse_events: Vec<serde_json::Value>,
     response_sse_events: Vec<serde_json::Value>,
+    diagnostics: &RelayDiagnostics,
 ) {
-    let debug_annotations = debug_annotations_for_request(&request_json);
+    let debug_annotations = debug_annotations_for_request_with_relay(&request_json, diagnostics);
     let response_json = response_sse_events
         .iter()
         .rev()
@@ -1045,6 +1464,15 @@ fn debug_annotations_for_request(request: &serde_json::Value) -> Vec<String> {
             seen.insert(key, idx);
         }
     }
+    annotations
+}
+
+fn debug_annotations_for_request_with_relay(
+    request: &serde_json::Value,
+    diagnostics: &RelayDiagnostics,
+) -> Vec<String> {
+    let mut annotations = debug_annotations_for_request(request);
+    annotations.extend(diagnostics.annotations());
     annotations
 }
 
@@ -1783,6 +2211,49 @@ mod tests {
             thinking: None,
             extra_body: serde_json::json!({}),
         }
+    }
+
+    #[test]
+    fn relay_diagnostics_records_counts_and_annotations() {
+        let mut diagnostics = RelayDiagnostics::default();
+        diagnostics.record_upstream("chat.completion.chunk".into());
+        diagnostics.record_zero_event_chunk();
+        diagnostics.record_unparseable();
+        diagnostics.record_heartbeat();
+        diagnostics.record_downstream("response.created");
+
+        let annotations = diagnostics.annotations();
+
+        assert!(annotations.contains(&"relay.upstream_chunk_count=1".to_string()));
+        assert!(annotations.contains(&"relay.downstream_event_count=1".to_string()));
+        assert!(annotations.contains(&"relay.zero_event_chunk_count=1".to_string()));
+        assert!(annotations.contains(&"relay.unparseable_upstream_event_count=1".to_string()));
+        assert!(annotations.contains(&"relay.heartbeat_event_count=1".to_string()));
+        assert!(
+            annotations
+                .iter()
+                .any(|annotation| annotation
+                    == "relay.last_upstream_event_kind=chat.completion.chunk")
+        );
+        assert!(
+            annotations
+                .iter()
+                .any(|annotation| annotation == "relay.last_downstream_event_kind=response.created")
+        );
+        assert!(
+            annotations
+                .iter()
+                .any(|annotation| annotation.starts_with("relay.last_downstream_event_elapsed_ms="))
+        );
+    }
+
+    #[test]
+    fn relay_diagnostics_heartbeat_due_requires_prior_downstream_event() {
+        let mut diagnostics = RelayDiagnostics::default();
+        assert!(!diagnostics.heartbeat_due(Duration::from_secs(0)));
+
+        diagnostics.record_downstream("response.created");
+        assert!(diagnostics.heartbeat_due(Duration::from_secs(0)));
     }
 
     #[test]

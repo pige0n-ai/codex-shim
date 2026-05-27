@@ -49,6 +49,9 @@ upstream:
   # Once SSE is being relayed, codex-shim emits response.failed on disconnect
   # and leaves turn-level retry to Codex. Defaults to max_retries when omitted.
   stream_max_retries: 2
+  # Lightweight Responses event emitted while upstream SSE is active but no
+  # downstream event can be relayed yet. Set to 0 to disable.
+  downstream_heartbeat_seconds: 30
 
 provider:
   # Built-in shim profile preset. This controls how codex-shim talks to the
