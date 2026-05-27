@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::{
     Json, Router,
@@ -44,6 +45,13 @@ pub enum Scenario {
         #[serde(default = "default_model")]
         model: String,
     },
+    /// Chat stream: text chunk, delayed empty-choices usage chunk, then DONE.
+    ChatStreamTextThenDelayedUsage {
+        text: String,
+        delay_ms: u64,
+        #[serde(default = "default_model")]
+        model: String,
+    },
     /// Chat stream with a tool call.
     ChatStreamToolCall {
         tool_name: String,
@@ -57,6 +65,21 @@ pub enum Scenario {
         reasoning: String,
         tool_name: String,
         tool_args: serde_json::Value,
+        #[serde(default = "default_model")]
+        model: String,
+    },
+    /// Chat stream with reasoning-only chunks separated by a delay.
+    ChatStreamReasoningChunks {
+        chunks: Vec<String>,
+        delay_ms: u64,
+        #[serde(default = "default_model")]
+        model: String,
+    },
+    /// Chat stream with a custom tool call whose arguments arrive in delayed chunks.
+    ChatStreamCustomToolArgumentChunks {
+        tool_name: String,
+        argument_chunks: Vec<String>,
+        delay_ms: u64,
         #[serde(default = "default_model")]
         model: String,
     },
@@ -238,10 +261,18 @@ async fn chat_completions(
                 sse_chat_stream(deltas, model)
             }
         }
+        Scenario::ChatStreamTextThenDelayedUsage {
+            text,
+            delay_ms,
+            model,
+        } if stream => sse_chat_stream_text_then_delayed_usage(text, *delay_ms, model),
         Scenario::ChatStreamText { .. } => {
             sse_chat_stream(&vec!["mock".into()], "mock-model")
         }
         Scenario::ChatStream429ThenText { .. } => {
+            sse_chat_stream(&vec!["mock".into()], "mock-model")
+        }
+        Scenario::ChatStreamTextThenDelayedUsage { .. } => {
             sse_chat_stream(&vec!["mock".into()], "mock-model")
         }
         Scenario::ChatStreamToolCall { tool_name, tool_args, text_before, model } if stream => {
@@ -259,11 +290,28 @@ async fn chat_completions(
             tool_args,
             model,
         } if stream => sse_chat_stream_reasoning_tool_call(reasoning, tool_name, tool_args, model),
+        Scenario::ChatStreamReasoningChunks {
+            chunks,
+            delay_ms,
+            model,
+        } if stream => sse_chat_stream_reasoning_chunks(chunks, *delay_ms, model),
+        Scenario::ChatStreamCustomToolArgumentChunks {
+            tool_name,
+            argument_chunks,
+            delay_ms,
+            model,
+        } if stream => {
+            sse_chat_stream_custom_tool_argument_chunks(tool_name, argument_chunks, *delay_ms, model)
+        }
         Scenario::ChatStreamReasoningToolCall { .. } => {
             Json(serde_json::json!({
                 "id": "chatcmpl_mock", "object": "chat.completion", "model": "mock-model",
                 "choices": [{"index":0,"message":{"role":"assistant","content":"tool"},"finish_reason":"stop"}]
             })).into_response()
+        }
+        Scenario::ChatStreamReasoningChunks { .. }
+        | Scenario::ChatStreamCustomToolArgumentChunks { .. } => {
+            sse_chat_stream(&vec!["mock".into()], "mock-model")
         }
         Scenario::Upstream401 => {
             (axum::http::StatusCode::UNAUTHORIZED,
@@ -312,6 +360,40 @@ fn sse_chat_stream(deltas: &[String], model: &str) -> Response {
             "id": "chatcmpl_stream_1", "object": "chat.completion.chunk", "created": 1714771200,
             "model": model, "choices": [],
             "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10}
+        });
+        yield Ok(axum::response::sse::Event::default().data(serde_json::to_string(&usage_chunk).unwrap()));
+        yield Ok(axum::response::sse::Event::default().data("[DONE]"));
+    };
+
+    Sse::new(stream).into_response()
+}
+
+fn sse_chat_stream_text_then_delayed_usage(text: &str, delay_ms: u64, model: &str) -> Response {
+    let text = text.to_string();
+    let model = model.to_string();
+
+    let stream = async_stream::stream! {
+        let text_chunk = serde_json::json!({
+            "id": "chatcmpl_delayed_usage_1",
+            "object": "chat.completion.chunk",
+            "created": 1714771200,
+            "model": model,
+            "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": null}]
+        });
+        yield Ok::<_, std::convert::Infallible>(
+            axum::response::sse::Event::default().data(serde_json::to_string(&text_chunk).unwrap())
+        );
+
+        if delay_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
+        let usage_chunk = serde_json::json!({
+            "id": "chatcmpl_delayed_usage_1",
+            "object": "chat.completion.chunk",
+            "created": 1714771200,
+            "model": model,
+            "choices": [],
+            "usage": {"prompt_tokens": 7, "completion_tokens": 11, "total_tokens": 18}
         });
         yield Ok(axum::response::sse::Event::default().data(serde_json::to_string(&usage_chunk).unwrap()));
         yield Ok(axum::response::sse::Event::default().data("[DONE]"));
@@ -408,6 +490,93 @@ fn sse_chat_stream_reasoning_tool_call(
             "model": model,
             "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
             "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        });
+        yield Ok(axum::response::sse::Event::default().data(serde_json::to_string(&final_chunk).unwrap()));
+        yield Ok(axum::response::sse::Event::default().data("[DONE]"));
+    };
+
+    Sse::new(stream).into_response()
+}
+
+fn sse_chat_stream_reasoning_chunks(chunks: &[String], delay_ms: u64, model: &str) -> Response {
+    let chunks = chunks.to_vec();
+    let model = model.to_string();
+
+    let stream = async_stream::stream! {
+        for (idx, reasoning) in chunks.iter().enumerate() {
+            if idx > 0 && delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+            let chunk = serde_json::json!({
+                "id": "chatcmpl_reasoning_chunks_1",
+                "object": "chat.completion.chunk",
+                "created": 1714771200,
+                "model": model,
+                "choices": [{"index": 0, "delta": {"reasoning_content": reasoning}, "finish_reason": null}]
+            });
+            yield Ok::<_, std::convert::Infallible>(
+                axum::response::sse::Event::default().data(serde_json::to_string(&chunk).unwrap())
+            );
+        }
+
+        if delay_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
+        let final_chunk = serde_json::json!({
+            "id": "chatcmpl_reasoning_chunks_1",
+            "object": "chat.completion.chunk",
+            "created": 1714771200,
+            "model": model,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        });
+        yield Ok(axum::response::sse::Event::default().data(serde_json::to_string(&final_chunk).unwrap()));
+        yield Ok(axum::response::sse::Event::default().data("[DONE]"));
+    };
+
+    Sse::new(stream).into_response()
+}
+
+fn sse_chat_stream_custom_tool_argument_chunks(
+    tool_name: &str,
+    argument_chunks: &[String],
+    delay_ms: u64,
+    model: &str,
+) -> Response {
+    let tool_name = tool_name.to_string();
+    let argument_chunks = argument_chunks.to_vec();
+    let model = model.to_string();
+
+    let stream = async_stream::stream! {
+        for (idx, arguments) in argument_chunks.iter().enumerate() {
+            if idx > 0 && delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+            let function = if idx == 0 {
+                serde_json::json!({"name": tool_name, "arguments": arguments})
+            } else {
+                serde_json::json!({"arguments": arguments})
+            };
+            let chunk = serde_json::json!({
+                "id": "chatcmpl_custom_tool_chunks_1",
+                "object": "chat.completion.chunk",
+                "created": 1714771200,
+                "model": model,
+                "choices": [{"index": 0, "delta": {
+                    "tool_calls": [{"index": 0, "id": "call_mock_1", "type": "function", "function": function}]
+                }, "finish_reason": null}]
+            });
+            yield Ok::<_, std::convert::Infallible>(
+                axum::response::sse::Event::default().data(serde_json::to_string(&chunk).unwrap())
+            );
+        }
+
+        let final_chunk = serde_json::json!({
+            "id": "chatcmpl_custom_tool_chunks_1",
+            "object": "chat.completion.chunk",
+            "created": 1714771200,
+            "model": model,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]
         });
         yield Ok(axum::response::sse::Event::default().data(serde_json::to_string(&final_chunk).unwrap()));
         yield Ok(axum::response::sse::Event::default().data("[DONE]"));

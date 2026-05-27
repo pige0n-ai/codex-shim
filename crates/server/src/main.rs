@@ -1265,6 +1265,9 @@ upstream:
   # Retries only before any SSE has been sent to Codex. Mid-stream
   # disconnects are returned as response.failed so Codex can retry the turn.
   stream_max_retries: 2
+  # Emit response.in_progress while upstream is active but no Responses event
+  # can be relayed yet, for example during reasoning-only or custom tool chunks.
+  downstream_heartbeat_seconds: 30
 
 provider:
   kind: {profile_name}
@@ -1356,7 +1359,8 @@ fn generate_slim_config(
 upstream:
   base_url: "{url}"
   api_key_env: "{api_key_env}"
-  stream_max_retries: 2"#,
+  stream_max_retries: 2
+  downstream_heartbeat_seconds: 30"#,
         )
     } else {
         format!(
@@ -1365,7 +1369,8 @@ upstream:
 
 upstream:
   api_key_env: "{api_key_env}"
-  stream_max_retries: 2"#,
+  stream_max_retries: 2
+  downstream_heartbeat_seconds: 30"#,
         )
     };
 
