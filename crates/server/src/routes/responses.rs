@@ -317,7 +317,7 @@ async fn handle_stream(
 
     let mut attempt = 0;
     let pre_stream_max_retries = state.config.upstream.pre_stream_max_retries();
-    let upstream_resp = loop {
+    let upstream_start: Result<reqwest::Response, (u16, String)> = loop {
         let request_builder = state
             .upstream
             .build_request(reqwest::Method::POST, &state.config.upstream.chat_path)
@@ -327,23 +327,28 @@ async fn handle_stream(
         match request_builder.json(&chat_req).send().await {
             Ok(resp) => {
                 let status = resp.status().as_u16();
-                if is_retryable_upstream_status(status) && attempt < pre_stream_max_retries {
-                    attempt += 1;
+                if status >= 400 {
                     let retry_after = retry_after_delay(resp.headers());
                     let body = resp.text().await.unwrap_or_default();
-                    let delay = retry_after.unwrap_or_else(|| retry_delay(attempt));
-                    tracing::warn!(
-                        %status,
-                        %attempt,
-                        max_retries = %pre_stream_max_retries,
-                        ?delay,
-                        %body,
-                        "Retrying upstream streaming request before relaying SSE after retryable status"
-                    );
-                    tokio::time::sleep(delay).await;
-                    continue;
+                    if mapper::error_mapper::is_retryable_upstream_error(status, &body)
+                        && attempt < pre_stream_max_retries
+                    {
+                        attempt += 1;
+                        let delay = retry_after.unwrap_or_else(|| retry_delay(attempt));
+                        tracing::warn!(
+                            %status,
+                            %attempt,
+                            max_retries = %pre_stream_max_retries,
+                            ?delay,
+                            %body,
+                            "Retrying upstream streaming request before relaying SSE after retryable error"
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    break Err((status, body));
                 }
-                break resp;
+                break Ok(resp);
             }
             Err(error) => {
                 if error.is_timeout() {
@@ -367,48 +372,52 @@ async fn handle_stream(
         }
     };
 
+    let upstream_resp = match upstream_start {
+        Ok(upstream_resp) => upstream_resp,
+        Err((status, body)) => {
+            tracing::info!(%status, "Upstream response status");
+            tracing::warn!(%status, %body, "Upstream error response");
+            let upstream_error = serde_json::from_str::<serde_json::Value>(&body)
+                .unwrap_or_else(|_| serde_json::json!({ "body": body.clone() }));
+            let created_at = chrono::Utc::now().timestamp();
+            persist_response_state(
+                &state,
+                ResponseState {
+                    conversation_id: None,
+                    id: mapped.response_id.clone(),
+                    model: resolved_model.clone(),
+                    created_at,
+                    status: "failed".into(),
+                    response_json: serde_json::Value::Null,
+                    previous_response_id: _req.previous_response_id.clone(),
+                    canonical_messages: chat_req.messages.clone(),
+                },
+                DebugArtifact {
+                    conversation_id: None,
+                    id: mapped.response_id.clone(),
+                    model: resolved_model,
+                    created_at,
+                    status: "failed".into(),
+                    upstream_error: Some(serde_json::json!({
+                        "status": status,
+                        "body": upstream_error,
+                    })),
+                    debug_annotations: debug_annotations_for_request(&request_json),
+                    request_json,
+                    mapped_request_json,
+                    upstream_sse_events: vec![],
+                    response_sse_events: vec![],
+                },
+            )
+            .map_err(&record_error)?;
+            return Err(record_error(mapper::error_mapper::map_upstream_error(
+                status, &body,
+            )));
+        }
+    };
+
     let status = upstream_resp.status().as_u16();
     tracing::info!(%status, "Upstream response status");
-    if status >= 400 {
-        let body = upstream_resp.text().await.unwrap_or_default();
-        tracing::warn!(%status, %body, "Upstream error response");
-        let upstream_error = serde_json::from_str::<serde_json::Value>(&body)
-            .unwrap_or_else(|_| serde_json::json!({ "body": body.clone() }));
-        let created_at = chrono::Utc::now().timestamp();
-        persist_response_state(
-            &state,
-            ResponseState {
-                conversation_id: None,
-                id: mapped.response_id.clone(),
-                model: resolved_model.clone(),
-                created_at,
-                status: "failed".into(),
-                response_json: serde_json::Value::Null,
-                previous_response_id: _req.previous_response_id.clone(),
-                canonical_messages: chat_req.messages.clone(),
-            },
-            DebugArtifact {
-                conversation_id: None,
-                id: mapped.response_id.clone(),
-                model: resolved_model,
-                created_at,
-                status: "failed".into(),
-                upstream_error: Some(serde_json::json!({
-                    "status": status,
-                    "body": upstream_error,
-                })),
-                debug_annotations: debug_annotations_for_request(&request_json),
-                request_json,
-                mapped_request_json,
-                upstream_sse_events: vec![],
-                response_sse_events: vec![],
-            },
-        )
-        .map_err(&record_error)?;
-        return Err(record_error(mapper::error_mapper::map_upstream_error(
-            status, &body,
-        )));
-    }
 
     // Set up stream processing
     let response_id = mapped.response_id.clone();
@@ -586,14 +595,20 @@ async fn handle_stream(
                         }
                     }
                 }
-                Err(_e) => {
+                Err(error) => {
+                    let error_message = error.to_string();
+                    tracing::warn!(
+                        response_id = %response_id,
+                        error = %error_message,
+                        "Upstream SSE stream interrupted while relaying to Codex"
+                    );
                     emit_stream_failure(
                         &tx,
                         &mut response_sse_events,
                         response_id.clone(),
                         model.clone(),
                         created_at,
-                        ApiError::stream_interrupted(),
+                        ApiError::stream_interrupted_with_details(error_message),
                     )
                     .await;
                     persist_stream_failure(
@@ -796,10 +811,6 @@ fn persist_stream_failure(
     }) {
         tracing::error!(%error, "Failed to persist failed streamed debug artifact");
     }
-}
-
-fn is_retryable_upstream_status(status: u16) -> bool {
-    status == 429 || (500..600).contains(&status)
 }
 
 fn retry_delay(attempt: u32) -> Duration {

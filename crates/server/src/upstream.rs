@@ -160,10 +160,18 @@ impl UpstreamClient {
                         });
                     }
 
-                    if status == 429 || (500..600).contains(&status) {
+                    if mapper::error_mapper::is_retryable_upstream_error(status, &body) {
                         attempt += 1;
                         if attempt <= self.config.max_retries {
                             let delay = Duration::from_secs(2u64.pow(attempt));
+                            tracing::warn!(
+                                %status,
+                                %attempt,
+                                max_retries = %self.config.max_retries,
+                                ?delay,
+                                body = %body,
+                                "Retrying upstream non-stream request after retryable error"
+                            );
                             tokio::time::sleep(delay).await;
                             continue;
                         }

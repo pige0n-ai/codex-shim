@@ -41,6 +41,7 @@ pub fn app_with_metrics(config: Config, metrics: Arc<RuntimeMetrics>) -> anyhow:
             "memory" | "ram" => Box::new(crate::store::MemoryStore::new(
                 config.state.ttl_seconds,
                 config.state.debug_artifact_ttl_seconds,
+                config.state.failed_debug_artifact_ttl_seconds,
             )),
             #[cfg(feature = "sqlite")]
             "sqlite" => {
@@ -59,6 +60,7 @@ pub fn app_with_metrics(config: Config, metrics: Arc<RuntimeMetrics>) -> anyhow:
                         &db_path,
                         config.state.ttl_seconds,
                         config.state.debug_artifact_ttl_seconds,
+                        config.state.failed_debug_artifact_ttl_seconds,
                     )
                     .expect("Failed to open SQLite store"),
                 )

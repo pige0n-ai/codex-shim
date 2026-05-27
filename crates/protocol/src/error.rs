@@ -164,6 +164,13 @@ impl ApiError {
         Self::new("Upstream stream interrupted", "stream_interrupted")
     }
 
+    pub fn stream_interrupted_with_details(details: impl Into<String>) -> Self {
+        Self::new(
+            format!("Upstream stream interrupted: {}", details.into()),
+            "stream_interrupted",
+        )
+    }
+
     pub fn internal(details: impl Into<String>) -> Self {
         Self::new(details, "internal_error")
     }
