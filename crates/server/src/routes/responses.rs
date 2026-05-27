@@ -596,7 +596,7 @@ async fn handle_stream(
                     }
                 }
                 Err(error) => {
-                    let error_message = error.to_string();
+                    let error_message = error_chain_message(&error);
                     tracing::warn!(
                         response_id = %response_id,
                         error = %error_message,
@@ -927,6 +927,20 @@ fn state_store_error(error: anyhow::Error) -> ApiError {
 fn to_json_value<T: Serialize>(label: &str, value: &T) -> Result<serde_json::Value, ApiError> {
     serde_json::to_value(value)
         .map_err(|error| ApiError::internal(format!("failed to serialize {label}: {error}")))
+}
+
+fn error_chain_message(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut parts: Vec<String> = vec![];
+    parts.push(error.to_string());
+    let mut source = error.source();
+    while let Some(err) = source {
+        let msg = err.to_string();
+        if msg != parts.last().map(|s| s.as_str()).unwrap_or("") {
+            parts.push(msg);
+        }
+        source = err.source();
+    }
+    parts.join(" | caused by: ")
 }
 
 fn sse_event_to_value(event: &ResponseSseEvent) -> Result<serde_json::Value, ApiError> {
