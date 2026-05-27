@@ -10,6 +10,9 @@ on:
       tag:
         description: 'Tag to release (e.g. v0.1.0 or gui-v0.1.0)'
         required: true
+      source_commit_url:
+        description: 'Upstream openai/codex commit URL for synced base instructions'
+        required: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -133,7 +136,7 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     needs: [detect, build]
     runs-on: ubuntu-latest
     permissions:
@@ -145,8 +148,14 @@ jobs:
           merge-multiple: true
 
       - name: Generate release notes
+        env:
+          SOURCE_COMMIT_URL: ${{ github.event.inputs.source_commit_url }}
         run: |
           {
+            if [[ -n "$SOURCE_COMMIT_URL" ]]; then
+              echo "Synced Codex base instructions from openai/codex commit: $SOURCE_COMMIT_URL"
+              echo
+            fi
             echo "| Platform | Target |"
             echo "|----------|--------|"
             echo "| Linux (static musl) | x86_64-unknown-linux-musl |"
@@ -158,5 +167,6 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           name: ${{ needs.detect.outputs.release-name }}
+          tag_name: ${{ needs.detect.outputs.release-tag }}
           body_path: notes.md
           files: dist/*

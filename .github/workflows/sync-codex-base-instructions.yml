@@ -1,0 +1,90 @@
+name: Sync Codex base instructions
+
+on:
+  schedule:
+    - cron: "17 */12 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-codex-base-instructions
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync prompt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync prompt
+        id: sync
+        run: python3 scripts/sync_codex_base_instructions.py
+
+      - name: Create pull request
+        id: cpr
+        if: steps.sync.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: chore/sync-codex-base-instructions
+          delete-branch: true
+          title: "chore: sync Codex base instructions"
+          commit-message: "chore: sync Codex base instructions"
+          body: |
+            Synced from openai/codex `codex-rs/models-manager/models.json`.
+
+            Model: `${{ steps.sync.outputs.model }}`
+            Source commit: ${{ steps.sync.outputs.source_commit_url }}
+            Source SHA256: `${{ steps.sync.outputs.source_sha256 }}`
+            Prompt SHA256: `${{ steps.sync.outputs.prompt_sha256 }}`
+
+      - name: Run CI for pull request
+        if: steps.cpr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run ci.yml --ref chore/sync-codex-base-instructions
+
+      - name: Merge pull request
+        if: steps.cpr.outputs.pull-request-number != ''
+        timeout-minutes: 60
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pr="${{ steps.cpr.outputs.pull-request-number }}"
+          gh pr merge "$pr" --auto --squash --delete-branch
+
+          while true; do
+            state="$(gh pr view "$pr" --json state --jq .state)"
+            if [[ "$state" == "MERGED" ]]; then
+              break
+            fi
+            if [[ "$state" == "CLOSED" ]]; then
+              echo "pull request closed before merge"
+              exit 1
+            fi
+            sleep 30
+          done
+
+      - name: Trigger release
+        if: steps.cpr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT_SHORT: ${{ steps.sync.outputs.source_commit_short }}
+          SOURCE_COMMIT_URL: ${{ steps.sync.outputs.source_commit_url }}
+        run: |
+          git fetch --tags --force
+          latest_tag="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | awk '/^v[0-9]+\.[0-9]+\.[0-9]+$/ { print; exit }')"
+          if [[ -z "$latest_tag" ]]; then
+            echo "latest release tag not found"
+            exit 1
+          fi
+          stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+          tag="${latest_tag}-inst-${stamp}-${SOURCE_COMMIT_SHORT}"
+          gh workflow run release.yml --ref main \
+            -f tag="$tag" \
+            -f source_commit_url="$SOURCE_COMMIT_URL"
