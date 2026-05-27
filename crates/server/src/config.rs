@@ -477,7 +477,7 @@ impl Default for StateConfig {
             backend: default_state_backend(),
             ttl_seconds: default_ttl(),
             debug_artifact_ttl_seconds: default_debug_artifact_ttl(),
-            failed_debug_artifact_ttl_seconds: None,
+            failed_debug_artifact_ttl_seconds: Some(0),
             cleanup_interval_seconds: default_cleanup_interval(),
             sqlite_path: None,
         }

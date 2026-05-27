@@ -2,13 +2,6 @@ use protocol::error::ApiError;
 
 /// Map an upstream HTTP error (status code + body) to an ApiError.
 pub fn map_upstream_error(status: u16, body: &str) -> ApiError {
-    if is_retryable_upstream_error(status, body) && status < 500 {
-        return ApiError::upstream_rate_limited(upstream_error_message(
-            body,
-            "Upstream rate limit exceeded",
-        ));
-    }
-
     match status {
         401 => ApiError::upstream_auth_error(upstream_error_message(
             body,
@@ -32,16 +25,8 @@ pub fn map_upstream_error(status: u16, body: &str) -> ApiError {
     }
 }
 
-pub fn is_retryable_upstream_error(status: u16, body: &str) -> bool {
-    status == 429 || (500..600).contains(&status) || (status == 400 && is_rate_limit_body(body))
-}
-
-fn is_rate_limit_body(body: &str) -> bool {
-    let lower = body.to_ascii_lowercase();
-    lower.contains("rate limit")
-        || lower.contains("rate_limit")
-        || lower.contains("too many requests")
-        || lower.contains("not admitted")
+pub fn is_retryable_upstream_error(status: u16, _body: &str) -> bool {
+    status == 429 || (500..600).contains(&status)
 }
 
 fn upstream_error_message(body: &str, default: &str) -> String {
@@ -68,19 +53,5 @@ fn first_line_or<'a>(text: &'a str, default: &'a str) -> String {
         default.into()
     } else {
         trimmed.into()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn maps_provider_admission_limit_as_rate_limited() {
-        let body = r#"{"error":{"message":"Cluster rate limit exceeded, request queued but not admitted"}}"#;
-        let error = map_upstream_error(400, body);
-        assert_eq!(error.error.error_type, "upstream_rate_limited");
-        assert!(error.error.message.contains("not admitted"));
-        assert!(is_retryable_upstream_error(400, body));
     }
 }
