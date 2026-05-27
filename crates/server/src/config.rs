@@ -300,6 +300,8 @@ pub struct StateConfig {
     pub ttl_seconds: u64,
     #[serde(default = "default_debug_artifact_ttl")]
     pub debug_artifact_ttl_seconds: u64,
+    #[serde(default)]
+    pub failed_debug_artifact_ttl_seconds: Option<u64>,
     #[serde(default = "default_cleanup_interval")]
     pub cleanup_interval_seconds: u64,
     #[serde(default)]
@@ -475,6 +477,7 @@ impl Default for StateConfig {
             backend: default_state_backend(),
             ttl_seconds: default_ttl(),
             debug_artifact_ttl_seconds: default_debug_artifact_ttl(),
+            failed_debug_artifact_ttl_seconds: None,
             cleanup_interval_seconds: default_cleanup_interval(),
             sqlite_path: None,
         }
@@ -865,6 +868,13 @@ mod tests {
         config.state.debug_artifact_ttl_seconds = 0;
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("state.debug_artifact_ttl_seconds must be greater than 0"));
+    }
+
+    #[test]
+    fn validate_accepts_zero_failed_debug_artifact_ttl_as_never_expire() {
+        let mut config = valid_config();
+        config.state.failed_debug_artifact_ttl_seconds = Some(0);
+        config.validate().unwrap();
     }
 
     #[test]

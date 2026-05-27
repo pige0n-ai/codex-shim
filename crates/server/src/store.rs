@@ -122,6 +122,30 @@ fn debug_view(record: DebugArtifactRecord) -> DebugArtifactView {
     }
 }
 
+fn expires_at_from_ttl(now: i64, ttl: Duration) -> i64 {
+    if ttl.is_zero() {
+        return i64::MAX;
+    }
+    i64::try_from(ttl.as_secs())
+        .ok()
+        .and_then(|seconds| now.checked_add(seconds))
+        .unwrap_or(i64::MAX)
+}
+
+fn debug_artifact_expires_at(
+    artifact: &DebugArtifact,
+    now: i64,
+    debug_ttl: Duration,
+    failed_debug_ttl: Option<Duration>,
+) -> i64 {
+    let ttl = if artifact.status == "completed" {
+        debug_ttl
+    } else {
+        failed_debug_ttl.unwrap_or(debug_ttl)
+    };
+    expires_at_from_ttl(now, ttl)
+}
+
 fn reasoning_map_from_messages(messages: &[ChatMessage]) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for msg in messages {
@@ -166,6 +190,7 @@ pub struct MemoryStore {
     inner: RwLock<MemoryInner>,
     ttl: Duration,
     debug_ttl: Duration,
+    failed_debug_ttl: Option<Duration>,
 }
 
 #[derive(Default)]
@@ -178,11 +203,16 @@ struct MemoryInner {
 }
 
 impl MemoryStore {
-    pub fn new(ttl_seconds: u64, debug_artifact_ttl_seconds: u64) -> Self {
+    pub fn new(
+        ttl_seconds: u64,
+        debug_artifact_ttl_seconds: u64,
+        failed_debug_artifact_ttl_seconds: Option<u64>,
+    ) -> Self {
         Self {
             inner: RwLock::new(MemoryInner::default()),
             ttl: Duration::from_secs(ttl_seconds),
             debug_ttl: Duration::from_secs(debug_artifact_ttl_seconds),
+            failed_debug_ttl: failed_debug_artifact_ttl_seconds.map(Duration::from_secs),
         }
     }
 }
@@ -284,7 +314,12 @@ impl ResponseStoreBackend for MemoryStore {
     }
 
     fn put_debug_artifact(&self, artifact: DebugArtifact) -> anyhow::Result<()> {
-        let expires_at = now_unix_seconds()? + self.debug_ttl.as_secs() as i64;
+        let expires_at = debug_artifact_expires_at(
+            &artifact,
+            now_unix_seconds()?,
+            self.debug_ttl,
+            self.failed_debug_ttl,
+        );
         self.inner.write().unwrap().debug_artifacts.insert(
             artifact.id.clone(),
             DebugArtifactRecord {
@@ -383,6 +418,7 @@ pub struct SqliteStore {
     conn: std::sync::Mutex<rusqlite::Connection>,
     ttl: Duration,
     debug_ttl: Duration,
+    failed_debug_ttl: Option<Duration>,
 }
 
 #[cfg(feature = "sqlite")]
@@ -391,6 +427,7 @@ impl SqliteStore {
         path: impl AsRef<Path>,
         ttl_seconds: u64,
         debug_artifact_ttl_seconds: u64,
+        failed_debug_artifact_ttl_seconds: Option<u64>,
     ) -> anyhow::Result<Self> {
         let mut conn = rusqlite::Connection::open(path)?;
         conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")
@@ -406,6 +443,7 @@ impl SqliteStore {
             conn: std::sync::Mutex::new(conn),
             ttl: Duration::from_secs(ttl_seconds),
             debug_ttl: Duration::from_secs(debug_artifact_ttl_seconds),
+            failed_debug_ttl: failed_debug_artifact_ttl_seconds.map(Duration::from_secs),
         })
     }
 
@@ -799,7 +837,12 @@ impl ResponseStoreBackend for SqliteStore {
 
     fn put_debug_artifact(&self, artifact: DebugArtifact) -> anyhow::Result<()> {
         let conv_id = default_conversation_id(artifact.conversation_id.as_deref());
-        let expires_at = now_unix_seconds()? + self.debug_ttl.as_secs() as i64;
+        let expires_at = debug_artifact_expires_at(
+            &artifact,
+            now_unix_seconds()?,
+            self.debug_ttl,
+            self.failed_debug_ttl,
+        );
         let request_json = serde_json::to_string(&artifact.request_json)
             .context("failed to serialize request_json")?;
         let mapped_request_json = serde_json::to_string(&artifact.mapped_request_json)
@@ -1135,9 +1178,22 @@ mod tests {
         }
     }
 
+    fn failed_debug_artifact(id: &str, created_at: i64) -> DebugArtifact {
+        DebugArtifact {
+            status: "failed".into(),
+            upstream_error: Some(serde_json::json!({
+                "stream_error": {
+                    "message": "synthetic stream error",
+                    "type": "stream_interrupted"
+                }
+            })),
+            ..debug_artifact(id, created_at)
+        }
+    }
+
     #[test]
     fn memory_store_compact_state_round_trips_canonical_messages() {
-        let store = MemoryStore::new(3600, 600);
+        let store = MemoryStore::new(3600, 600, None);
         let messages = vec![
             ChatMessage::System {
                 content: protocol::chat::ChatContent::Text("instructions".into()),
@@ -1171,7 +1227,7 @@ mod tests {
 
     #[test]
     fn memory_store_debug_artifact_expires_without_deleting_state() {
-        let store = MemoryStore::new(3600, 1);
+        let store = MemoryStore::new(3600, 1, None);
         store
             .put_response_state(response_state(
                 "resp-1",
@@ -1193,8 +1249,27 @@ mod tests {
     }
 
     #[test]
+    fn memory_store_failed_debug_artifact_uses_failed_ttl() {
+        let store = MemoryStore::new(3600, 1, Some(0));
+        store
+            .put_debug_artifact(failed_debug_artifact(
+                "failed-resp",
+                now_unix_seconds().unwrap(),
+            ))
+            .unwrap();
+
+        std::thread::sleep(Duration::from_secs(2));
+        assert_eq!(store.cleanup_expired().unwrap(), 0);
+        let artifact = store
+            .get_debug_artifact("failed-resp")
+            .unwrap()
+            .expect("failed artifact should remain");
+        assert_eq!(artifact.artifact_expires_at, i64::MAX);
+    }
+
+    #[test]
     fn memory_store_reasoning_lookup_is_targeted() {
-        let store = MemoryStore::new(3600, 600);
+        let store = MemoryStore::new(3600, 600, None);
         store
             .put_response_state(response_state(
                 "resp-1",
@@ -1212,7 +1287,7 @@ mod tests {
 
     #[test]
     fn memory_store_lists_recent_debug_artifacts_only() {
-        let store = MemoryStore::new(3600, 600);
+        let store = MemoryStore::new(3600, 600, None);
         for (id, created_at) in [("old", 1), ("new", 3), ("mid", 2)] {
             store
                 .put_debug_artifact(debug_artifact(id, created_at))
@@ -1229,7 +1304,7 @@ mod tests {
 
     #[test]
     fn memory_store_delete_removes_state_debug_and_reasoning() {
-        let store = MemoryStore::new(3600, 600);
+        let store = MemoryStore::new(3600, 600, None);
         store
             .put_response_state(response_state(
                 "resp-1",
@@ -1258,7 +1333,7 @@ mod tests {
     fn sqlite_store_compact_state_round_trips_canonical_messages() {
         let path =
             std::env::temp_dir().join(format!("codex-shim-store-{}.db", uuid::Uuid::new_v4()));
-        let store = SqliteStore::new(&path, 3600, 600).expect("sqlite store");
+        let store = SqliteStore::new(&path, 3600, 600, None).expect("sqlite store");
         let messages = vec![
             ChatMessage::User {
                 content: protocol::chat::ChatContent::Text("hi".into()),
@@ -1291,7 +1366,7 @@ mod tests {
     fn sqlite_store_round_trips_debug_artifacts_separately() {
         let path =
             std::env::temp_dir().join(format!("codex-shim-debug-{}.db", uuid::Uuid::new_v4()));
-        let store = SqliteStore::new(&path, 3600, 600).expect("sqlite store");
+        let store = SqliteStore::new(&path, 3600, 600, None).expect("sqlite store");
         store
             .put_response_state(response_state("sqlite-debug-1", 1000, vec![]))
             .unwrap();
@@ -1372,7 +1447,7 @@ mod tests {
             .unwrap();
         }
 
-        let store = SqliteStore::new(&path, 3600, 600).expect("migrated sqlite store");
+        let store = SqliteStore::new(&path, 3600, 600, None).expect("migrated sqlite store");
         assert!(store.get_response_json("legacy-1").unwrap().is_some());
         assert!(store.get_canonical_messages("legacy-1").unwrap().is_some());
         assert!(store.get_debug_artifact("legacy-1").unwrap().is_some());

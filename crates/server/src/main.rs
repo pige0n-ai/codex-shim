@@ -1288,6 +1288,8 @@ models:
 state:
   backend: memory
   debug_artifact_ttl_seconds: 600
+  # Optional: retain failed raw request/SSE artifacts longer; 0 disables expiry.
+  # failed_debug_artifact_ttl_seconds: 0
 
 logging:
   level: info
@@ -1426,6 +1428,8 @@ models:
 state:
   backend: memory
   debug_artifact_ttl_seconds: 600
+  # Optional: retain failed raw request/SSE artifacts longer; 0 disables expiry.
+  # failed_debug_artifact_ttl_seconds: 0
 
 logging:
   level: info
