@@ -46,7 +46,7 @@ pub fn map_response_tools(tools: &[ResponseTool], config: &MappingConfig) -> Vec
                                 description,
                             )),
                             parameters: Some(apply_patch_tool::structured_schema()),
-                            strict: Some(false),
+                            strict: Some(config.apply_patch_upstream_strict),
                         },
                     })
                 } else {
@@ -89,7 +89,7 @@ pub fn apply_chat_tool_mapping_overrides(
                 tool.function.description =
                     Some(apply_patch_tool::structured_description(original));
                 tool.function.parameters = Some(apply_patch_tool::structured_schema());
-                tool.function.strict = Some(false);
+                tool.function.strict = Some(config.apply_patch_upstream_strict);
             }
         }
     }

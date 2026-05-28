@@ -23,9 +23,11 @@ pub fn structured_schema() -> Value {
             },
             "raw_patch": {
                 "type": "string",
-                "description": "A complete Codex apply_patch payload including Begin Patch and End Patch markers."
+                "minLength": 1,
+                "description": "Required fallback. A complete raw Codex apply_patch payload including Begin Patch and End Patch markers."
             }
         },
+        "required": ["raw_patch"],
         "additionalProperties": false,
         "$defs": {
             "add_hunk": {
@@ -103,7 +105,8 @@ pub fn structured_description(original_description: &str) -> String {
     format!(
         "{original_description}\n\n\
 Chat adapter contract: this upstream tool uses structured JSON. The shim will compile the JSON AST into the raw Codex apply_patch payload before returning it to Codex.\n\n\
-Use `hunks` for normal edits. Include `raw_patch` as a fallback whenever practical; if the structured AST is invalid and `raw_patch` is a non-empty string, the shim will pass `raw_patch` through to Codex apply_patch unchanged. \
+You must always include a non-empty `raw_patch` field. `raw_patch` is required even when `hunks` is present. \
+Use `hunks` for normal edits. If the structured AST is invalid and `raw_patch` is a non-empty string, the shim will pass `raw_patch` through to Codex apply_patch unchanged. \
 The `raw_patch` value is Codex apply_patch grammar, not unified diff: it must include `*** Begin Patch` and `*** End Patch`, and file headers must be `*** Add File: ...`, `*** Delete File: ...`, or `*** Update File: ...`.\n\n\
 Do not include `*** Begin Patch`, `*** End Patch`, line-prefix characters, or unified diff headers in the JSON AST fields; the shim writes those markers from `hunks`. \
 For update changes, each line object uses `op`: `context`, `remove`, or `add`. `anchor` is literal text after `@@`, not a line range such as `@@ -1,2 +1,2 @@`. Set `end_of_file` only when the change must match the physical end of the file."

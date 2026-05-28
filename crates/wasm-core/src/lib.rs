@@ -18,6 +18,7 @@ pub fn map_responses_request(request_json: &str, config_json: &str) -> Result<St
         native_responses_passthrough: config.native_responses_passthrough,
         provider_kind: config.provider_kind,
         apply_patch_upstream_tool_type: config.apply_patch_upstream_tool_type,
+        apply_patch_upstream_strict: config.apply_patch_upstream_strict,
     };
 
     let result = mapper::responses_to_chat(&req, &[], &mapping_config)
@@ -49,6 +50,7 @@ pub fn map_chat_response(
         native_responses_passthrough: config.native_responses_passthrough,
         provider_kind: config.provider_kind,
         apply_patch_upstream_tool_type: config.apply_patch_upstream_tool_type,
+        apply_patch_upstream_strict: config.apply_patch_upstream_strict,
     };
 
     let response_id = format!("resp_{}", uuid::Uuid::new_v4());
@@ -104,6 +106,8 @@ struct WasmMappingConfig {
     provider_kind: String,
     #[serde(default = "default_apply_patch_upstream_tool_type")]
     apply_patch_upstream_tool_type: String,
+    #[serde(default)]
+    apply_patch_upstream_strict: bool,
 }
 
 fn default_provider_kind() -> String {

@@ -36,7 +36,7 @@ pub fn map_input_to_messages(input: &ResponseInput) -> Result<Vec<ChatMessage>, 
                         "input object is not a valid Responses item: {e}"
                     ))
                 })?;
-                map_input_item_to_message(&item).map(|m| vec![m])
+                map_input_item_to_messages(&item)
             }
             // Arrays must contain only valid Responses items.
             serde_json::Value::Array(arr) => {
@@ -47,7 +47,7 @@ pub fn map_input_to_messages(input: &ResponseInput) -> Result<Vec<ChatMessage>, 
                             "input array contains an invalid Responses item: {e}"
                         ))
                     })?;
-                    messages.push(map_input_item_to_message(&item)?);
+                    messages.extend(map_input_item_to_messages(&item)?);
                 }
                 Ok(messages)
             }
@@ -75,25 +75,27 @@ pub fn map_input_to_messages(input: &ResponseInput) -> Result<Vec<ChatMessage>, 
                     continue; // Reasoning items don't produce a standalone message
                 }
 
-                let mut msg = map_input_item_to_message(item)?;
+                let mut mapped_messages = map_input_item_to_messages(item)?;
 
-                // Attach pending reasoning_content to assistant messages
+                // Attach pending reasoning_content to the first assistant message.
                 if let Some(rc) = pending_reasoning.take() {
-                    if let ChatMessage::Assistant {
-                        reasoning_content, ..
-                    } = &mut msg
-                    {
-                        *reasoning_content = Some(rc.clone());
+                    let mut consumed = false;
+                    for msg in &mut mapped_messages {
+                        if let ChatMessage::Assistant {
+                            reasoning_content, ..
+                        } = msg
+                        {
+                            *reasoning_content = Some(rc.clone());
+                            consumed = true;
+                            break;
+                        }
                     }
-                    // If the item doesn't produce an assistant message but we have reasoning,
-                    // we still want to preserve it for the next assistant message.
-                    // Put it back if not consumed.
-                    if !matches!(&msg, ChatMessage::Assistant { .. }) {
-                        pending_reasoning = Some(rc.clone());
+                    if !consumed {
+                        pending_reasoning = Some(rc);
                     }
                 }
 
-                messages.push(msg);
+                messages.extend(mapped_messages);
             }
             if pending_reasoning.is_some() {
                 return Err(ApiError::invalid_json(
@@ -140,6 +142,15 @@ pub fn apply_chat_history_mapping_overrides(
     Ok(())
 }
 
+fn map_input_item_to_messages(item: &InputItem) -> Result<Vec<ChatMessage>, ApiError> {
+    match item {
+        InputItem::FunctionCallOutput {
+            call_id, output, ..
+        } => Ok(function_call_output_messages(call_id, output)),
+        _ => map_input_item_to_message(item).map(|message| vec![message]),
+    }
+}
+
 /// Convert a function_call_output value (string or array) to plain text.
 fn value_to_string(val: &serde_json::Value) -> String {
     match val {
@@ -164,6 +175,83 @@ fn value_to_string(val: &serde_json::Value) -> String {
         }
         _ => val.to_string(),
     }
+}
+
+fn function_call_output_messages(call_id: &str, output: &serde_json::Value) -> Vec<ChatMessage> {
+    let mut messages = vec![ChatMessage::Tool {
+        content: ChatContent::Text(function_call_output_tool_text(call_id, output)),
+        tool_call_id: call_id.to_string(),
+    }];
+
+    for (index, image_url) in function_call_output_images(output).into_iter().enumerate() {
+        messages.push(ChatMessage::User {
+            content: ChatContent::Parts(vec![
+                protocol::chat::ChatContentPart::Text {
+                    text: format!("Image output {} from tool call {}.", index + 1, call_id),
+                },
+                protocol::chat::ChatContentPart::ImageUrl {
+                    image_url: protocol::chat::ChatImageUrl {
+                        url: image_url.url().to_string(),
+                        detail: image_url.detail().map(String::from),
+                    },
+                },
+            ]),
+            name: None,
+        });
+    }
+
+    messages
+}
+
+fn function_call_output_tool_text(call_id: &str, output: &serde_json::Value) -> String {
+    let image_count = function_call_output_images(output).len();
+    let text = if image_count == 0 {
+        value_to_string(output)
+    } else {
+        function_call_output_text_parts(output).join("\n")
+    };
+    if image_count == 0 {
+        text
+    } else if text.is_empty() {
+        format!("Tool call {call_id} returned {image_count} image output(s).")
+    } else {
+        format!(
+            "{text}\n[Tool call {call_id} returned {image_count} image output(s) attached as following user message(s).]"
+        )
+    }
+}
+
+fn function_call_output_text_parts(output: &serde_json::Value) -> Vec<String> {
+    let serde_json::Value::Array(items) = output else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            item.get("type")
+                .and_then(|t| t.as_str())
+                .filter(|t| *t == "input_text")
+                .and_then(|_| item.get("text"))
+                .and_then(|t| t.as_str())
+                .map(String::from)
+        })
+        .collect()
+}
+
+fn function_call_output_images(output: &serde_json::Value) -> Vec<protocol::common::ImageUrl> {
+    let serde_json::Value::Array(items) = output else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            serde_json::from_value::<protocol::common::ContentPart>(item.clone()).ok()
+        })
+        .filter_map(|part| match part {
+            protocol::common::ContentPart::InputImage { image_url } => Some(image_url),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Insert an `instructions` string as the first system message.

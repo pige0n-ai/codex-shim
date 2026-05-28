@@ -69,6 +69,7 @@ models:
       supports_image_detail_original: false
       apply_patch_tool_type: freeform
       apply_patch_upstream_tool_type: structured
+      apply_patch_upstream_strict: false
 ```
 
 `tool_calling: true` makes `codex-shim` advertise a Codex shell-capable model.
@@ -77,6 +78,11 @@ models:
 For Chat Completions upstreams, `apply_patch_upstream_tool_type: structured`
 keeps the Codex-facing freeform capability but exposes a structured JSON AST
 tool upstream; the shim compiles that AST back into Codex apply_patch syntax.
+Structured apply_patch now requires a non-empty `raw_patch` field in every
+upstream tool call. If the AST cannot be compiled but `raw_patch` is present,
+the shim passes the raw Codex patch through unchanged. Set
+`apply_patch_upstream_strict: true` only for providers that accept this JSON
+schema in strict function mode.
 
 When `models.catalog` is omitted and `models.default` is set, `codex-shim`
 auto-generates a single catalog entry. That generated entry should advertise

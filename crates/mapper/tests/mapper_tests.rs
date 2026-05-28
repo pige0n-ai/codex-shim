@@ -223,10 +223,50 @@ mod tests {
                 .description
                 .as_deref()
                 .unwrap()
-                .contains("structured JSON")
+                .contains("You must always include a non-empty `raw_patch` field")
         );
-        assert!(tool.function.parameters.as_ref().unwrap()["properties"]["hunks"].is_object());
-        assert!(tool.function.parameters.as_ref().unwrap()["$defs"]["update_hunk"].is_object());
+        let parameters = tool.function.parameters.as_ref().unwrap();
+        assert!(parameters["properties"]["hunks"].is_object());
+        assert!(parameters["properties"]["raw_patch"]["minLength"].as_u64() == Some(1));
+        assert_eq!(parameters["required"], serde_json::json!(["raw_patch"]));
+        assert!(parameters["$defs"]["update_hunk"].is_object());
+        assert_eq!(tool.function.strict, Some(false));
+    }
+
+    #[test]
+    fn apply_patch_structured_mapping_can_enable_strict() {
+        let req = ResponsesCreateRequest {
+            model: "deepseek-v4-pro".into(),
+            input: ResponseInput::Text("edit".into()),
+            instructions: None,
+            previous_response_id: None,
+            store: None,
+            stream: Some(false),
+            max_output_tokens: None,
+            temperature: None,
+            top_p: None,
+            tools: Some(vec![ResponseTool::Custom {
+                name: "apply_patch".into(),
+                description: "Use apply_patch".into(),
+                format: custom_format(),
+            }]),
+            tool_choice: None,
+            parallel_tool_calls: None,
+            reasoning: None,
+            text: None,
+            include: None,
+            metadata: None,
+        };
+        let config = MappingConfig {
+            apply_patch_upstream_tool_type: apply_patch_tool::APPLY_PATCH_UPSTREAM_STRUCTURED
+                .into(),
+            apply_patch_upstream_strict: true,
+            ..MappingConfig::default()
+        };
+
+        let result = responses_to_chat(&req, &[], &config).unwrap();
+        let tool = &result.chat_request.tools.unwrap()[0];
+        assert_eq!(tool.function.strict, Some(true));
     }
 
     #[test]
@@ -411,6 +451,70 @@ mod tests {
                 assert_eq!(tool_call_id, "call_123");
             }
             _ => panic!("expected tool message"),
+        }
+    }
+
+    #[test]
+    fn function_call_output_image_becomes_tool_ack_and_user_image_message() {
+        let req = ResponsesCreateRequest {
+            model: "mimo-v2.5-pro".into(),
+            input: ResponseInput::Items(vec![InputItem::FunctionCallOutput {
+                id: None,
+                call_id: "call_img".into(),
+                output: serde_json::json!([
+                    {"type": "input_text", "text": "screenshot captured"},
+                    {"type": "input_image", "image_url": {"url": "data:image/png;base64,AAAA", "detail": "high"}}
+                ]),
+                status: None,
+            }]),
+            instructions: None,
+            previous_response_id: None,
+            store: None,
+            stream: Some(false),
+            max_output_tokens: None,
+            temperature: None,
+            top_p: None,
+            tools: None,
+            tool_choice: None,
+            parallel_tool_calls: None,
+            reasoning: None,
+            text: None,
+            include: None,
+            metadata: None,
+        };
+
+        let result = responses_to_chat(&req, &[], &default_config()).unwrap();
+        assert_eq!(result.chat_request.messages.len(), 2);
+        match &result.chat_request.messages[0] {
+            ChatMessage::Tool {
+                content,
+                tool_call_id,
+            } => {
+                assert_eq!(tool_call_id, "call_img");
+                assert_eq!(
+                    content,
+                    &ChatContent::Text(
+                        "screenshot captured\n[Tool call call_img returned 1 image output(s) attached as following user message(s).]"
+                            .into()
+                    )
+                );
+            }
+            _ => panic!("expected text tool acknowledgement"),
+        }
+        match &result.chat_request.messages[1] {
+            ChatMessage::User {
+                content: ChatContent::Parts(parts),
+                ..
+            } => {
+                assert!(matches!(parts[0], ChatContentPart::Text { .. }));
+                assert!(matches!(
+                    &parts[1],
+                    ChatContentPart::ImageUrl { image_url }
+                        if image_url.url == "data:image/png;base64,AAAA"
+                            && image_url.detail.as_deref() == Some("high")
+                ));
+            }
+            _ => panic!("expected synthetic user image message"),
         }
     }
 
