@@ -192,6 +192,9 @@ models:
       # to expose a JSON AST tool upstream and let the shim compile it back to
       # Codex apply_patch syntax.
       apply_patch_upstream_tool_type: structured
+      # Optional strict flag for the upstream Chat Completions function schema.
+      # Defaults to false; enable only for providers that accept this schema.
+      apply_patch_upstream_strict: false
 
       # Whether Codex may send image detail = "original".
       supports_image_detail_original: false

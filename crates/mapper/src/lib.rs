@@ -30,6 +30,9 @@ pub struct MappingConfig {
     pub provider_kind: String,
     /// How to expose Codex apply_patch custom tools to upstream Chat Completions.
     pub apply_patch_upstream_tool_type: String,
+    /// Whether structured apply_patch should set Chat Completions function
+    /// strict mode.
+    pub apply_patch_upstream_strict: bool,
 }
 
 impl Default for MappingConfig {
@@ -41,6 +44,7 @@ impl Default for MappingConfig {
             native_responses_passthrough: false,
             provider_kind: "generic-openai-chat".into(),
             apply_patch_upstream_tool_type: apply_patch_tool::APPLY_PATCH_UPSTREAM_FREEFORM.into(),
+            apply_patch_upstream_strict: false,
         }
     }
 }

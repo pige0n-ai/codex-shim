@@ -192,6 +192,22 @@ sampling defaults such as `temperature: 0.0` to remain effective. Do not put a
 DeepSeek `thinking` field under `provider.profile_config.extra_body`; the config
 validator rejects that shape so invalid OpenAI-compatible payloads fail early.
 
+## Chat Adapter Boundaries
+
+For Chat Completions upstreams, `function_call_output` text is sent as a
+standard `role: tool` message. If a tool output contains `input_image` parts,
+codex-shim keeps the tool message textual and appends one synthetic `role: user`
+multimodal message per image. This is the most compatible shape for
+OpenAI-compatible `/chat/completions` providers, whose support for multimodal
+`role: tool` messages is inconsistent. Image URLs must still be reachable by the
+upstream provider; local paths are not uploaded by the shim.
+
+When a streaming upstream response fails after HTTP 200, failed debug artifacts
+include relay diagnostics under `upstream_error`: HTTP status/version, redacted
+response headers, reqwest body-error classification, the error source chain, and
+the tail of raw upstream SSE data. These fields are intended for distinguishing
+provider/body transport failures from mapper failures.
+
 ## Other Blocks
 
 ```yaml

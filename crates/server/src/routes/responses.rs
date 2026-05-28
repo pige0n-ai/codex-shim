@@ -12,6 +12,7 @@ use protocol::responses::ResponsesCreateRequest;
 use protocol::sse::ResponseSseEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use crate::AppState;
@@ -418,6 +419,7 @@ async fn handle_stream(
 
     let status = upstream_resp.status().as_u16();
     tracing::info!(%status, "Upstream response status");
+    let upstream_metadata = UpstreamResponseMetadata::from_response(&upstream_resp);
 
     // Set up stream processing
     let response_id = mapped.response_id.clone();
@@ -446,9 +448,7 @@ async fn handle_stream(
 
     // Spawn task to read upstream SSE and convert to Response events
     tokio::spawn(async move {
-        let byte_stream = upstream_resp
-            .bytes_stream()
-            .map(|r| r.map_err(std::io::Error::other));
+        let byte_stream = upstream_resp.bytes_stream();
 
         let sse_stream = eventsource_stream::EventStream::new(byte_stream);
         let mut stream_state = mapper::sse_mapper::StreamState::new(
@@ -475,6 +475,7 @@ async fn handle_stream(
                 Ok(event) => {
                     let data = event.data;
                     relay_diagnostics.record_upstream(upstream_event_kind(&data));
+                    relay_diagnostics.record_upstream_data(&data);
 
                     if data == "[DONE]" {
                         upstream_sse_events.push(serde_json::json!({"data": "[DONE]"}));
@@ -803,6 +804,10 @@ async fn handle_stream(
                 }
                 Err(error) => {
                     let error_message = error_chain_message(&error);
+                    relay_diagnostics.record_stream_error(upstream_stream_error_json(
+                        &error,
+                        &upstream_metadata,
+                    ));
                     tracing::warn!(
                         response_id = %response_id,
                         error = %error_message,
@@ -959,13 +964,32 @@ struct RelayDiagnostics {
     heartbeat_event_count: u64,
     last_upstream_event_kind: Option<String>,
     last_downstream_event_kind: Option<&'static str>,
+    first_upstream_event_at: Option<Instant>,
+    last_upstream_event_at: Option<Instant>,
     last_downstream_event_at: Option<Instant>,
+    upstream_raw_sse_tail: VecDeque<String>,
+    stream_error_detail: Option<serde_json::Value>,
 }
 
 impl RelayDiagnostics {
     fn record_upstream(&mut self, kind: String) {
         self.upstream_chunk_count += 1;
         self.last_upstream_event_kind = Some(kind);
+        let now = Instant::now();
+        if self.first_upstream_event_at.is_none() {
+            self.first_upstream_event_at = Some(now);
+        }
+        self.last_upstream_event_at = Some(now);
+    }
+
+    fn record_upstream_data(&mut self, data: &str) {
+        const RAW_SSE_TAIL_LIMIT: usize = 8;
+        const RAW_SSE_DATA_LIMIT: usize = 4096;
+        if self.upstream_raw_sse_tail.len() == RAW_SSE_TAIL_LIMIT {
+            self.upstream_raw_sse_tail.pop_front();
+        }
+        self.upstream_raw_sse_tail
+            .push_back(truncate_for_debug(data, RAW_SSE_DATA_LIMIT));
     }
 
     fn record_zero_event_chunk(&mut self) {
@@ -984,6 +1008,17 @@ impl RelayDiagnostics {
 
     fn record_heartbeat(&mut self) {
         self.heartbeat_event_count += 1;
+    }
+
+    fn record_stream_error(&mut self, mut detail: serde_json::Value) {
+        detail["upstream_raw_sse_tail"] = serde_json::Value::Array(
+            self.upstream_raw_sse_tail
+                .iter()
+                .cloned()
+                .map(serde_json::Value::String)
+                .collect(),
+        );
+        self.stream_error_detail = Some(detail);
     }
 
     fn heartbeat_due(&self, interval: Duration) -> bool {
@@ -1016,14 +1051,155 @@ impl RelayDiagnostics {
         if let Some(kind) = self.last_downstream_event_kind {
             annotations.push(format!("relay.last_downstream_event_kind={kind}"));
         }
+        if let Some(first_upstream_event_at) = self.first_upstream_event_at {
+            annotations.push(format!(
+                "relay.first_upstream_event_age_ms={}",
+                first_upstream_event_at.elapsed().as_millis()
+            ));
+        }
+        if let Some(last_upstream_event_at) = self.last_upstream_event_at {
+            annotations.push(format!(
+                "relay.last_upstream_event_elapsed_ms={}",
+                last_upstream_event_at.elapsed().as_millis()
+            ));
+        }
         if let Some(last_downstream_event_at) = self.last_downstream_event_at {
             annotations.push(format!(
                 "relay.last_downstream_event_elapsed_ms={}",
                 last_downstream_event_at.elapsed().as_millis()
             ));
         }
+        if let Some(error) = &self.stream_error_detail {
+            if let Some(kind) = error.get("kind").and_then(Value::as_str) {
+                annotations.push(format!("relay.stream_error_kind={kind}"));
+            }
+            if let Some(classification) = error.get("classification").and_then(Value::as_object) {
+                for key in [
+                    "is_timeout",
+                    "is_decode",
+                    "is_body",
+                    "is_connect",
+                    "is_request",
+                    "is_status",
+                ] {
+                    if let Some(value) = classification.get(key).and_then(Value::as_bool) {
+                        annotations.push(format!("relay.stream_error.{key}={value}"));
+                    }
+                }
+            }
+        }
         annotations
     }
+}
+
+#[derive(Clone)]
+struct UpstreamResponseMetadata {
+    status: u16,
+    http_version: String,
+    headers: serde_json::Value,
+}
+
+impl UpstreamResponseMetadata {
+    fn from_response(response: &reqwest::Response) -> Self {
+        Self {
+            status: response.status().as_u16(),
+            http_version: format!("{:?}", response.version()),
+            headers: response_headers_json(response.headers()),
+        }
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "status": self.status,
+            "http_version": self.http_version,
+            "headers": self.headers,
+        })
+    }
+}
+
+fn upstream_stream_error_json(
+    error: &eventsource_stream::EventStreamError<reqwest::Error>,
+    metadata: &UpstreamResponseMetadata,
+) -> serde_json::Value {
+    let base = serde_json::json!({
+        "message": error.to_string(),
+        "source_chain": error_chain_message(error),
+        "upstream_response": metadata.to_json(),
+    });
+    match error {
+        eventsource_stream::EventStreamError::Transport(reqwest_error) => {
+            let mut value = base;
+            value["kind"] = serde_json::Value::String("transport".into());
+            value["classification"] = reqwest_error_classification(reqwest_error);
+            if let Some(url) = reqwest_error.url() {
+                value["url"] = serde_json::Value::String(redact_url_for_debug(url.as_str()));
+            }
+            value
+        }
+        eventsource_stream::EventStreamError::Utf8(_) => {
+            let mut value = base;
+            value["kind"] = serde_json::Value::String("utf8".into());
+            value
+        }
+        eventsource_stream::EventStreamError::Parser(_) => {
+            let mut value = base;
+            value["kind"] = serde_json::Value::String("parser".into());
+            value
+        }
+    }
+}
+
+fn reqwest_error_classification(error: &reqwest::Error) -> serde_json::Value {
+    serde_json::json!({
+        "is_timeout": error.is_timeout(),
+        "is_decode": error.is_decode(),
+        "is_body": error.is_body(),
+        "is_connect": error.is_connect(),
+        "is_request": error.is_request(),
+        "is_status": error.is_status(),
+    })
+}
+
+fn response_headers_json(headers: &reqwest::header::HeaderMap) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    for (name, value) in headers {
+        let key = name.as_str().to_ascii_lowercase();
+        let value = if is_sensitive_header(&key) {
+            "[REDACTED]".to_string()
+        } else {
+            value
+                .to_str()
+                .map(|value| truncate_for_debug(value, 2048))
+                .unwrap_or_else(|_| "[NON_UTF8]".to_string())
+        };
+        object.insert(key, serde_json::Value::String(value));
+    }
+    serde_json::Value::Object(object)
+}
+
+fn is_sensitive_header(name: &str) -> bool {
+    matches!(
+        name,
+        "authorization" | "proxy-authorization" | "cookie" | "set-cookie" | "x-api-key"
+    ) || name.contains("token")
+        || name.contains("secret")
+        || name.contains("key")
+}
+
+fn redact_url_for_debug(url: &str) -> String {
+    url.split('?').next().unwrap_or(url).to_string()
+}
+
+fn truncate_for_debug(value: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for (idx, ch) in value.chars().enumerate() {
+        if idx == max_chars {
+            out.push_str("...[truncated]");
+            return out;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 fn upstream_event_kind(data: &str) -> String {
@@ -1219,11 +1395,13 @@ fn persist_stream_failure(
         status: "failed".into(),
         request_json,
         mapped_request_json,
-        upstream_error: response_sse_events
-            .iter()
-            .rev()
-            .find_map(|event| event.get("error").cloned())
-            .map(|error| serde_json::json!({ "stream_error": error })),
+        upstream_error: diagnostics.stream_error_detail.clone().or_else(|| {
+            response_sse_events
+                .iter()
+                .rev()
+                .find_map(|event| event.get("error").cloned())
+                .map(|error| serde_json::json!({ "stream_error": error }))
+        }),
         debug_annotations,
         upstream_sse_events,
         response_sse_events,
@@ -1839,6 +2017,14 @@ fn build_mapping_config(state: &AppState, resolved_model: &str) -> MappingConfig
         .find(|model| model.slug == resolved_model)
         .and_then(|model| model.apply_patch_upstream_tool_type.clone())
         .unwrap_or_else(|| mapper::apply_patch_tool::APPLY_PATCH_UPSTREAM_FREEFORM.into());
+    let apply_patch_upstream_strict = state
+        .config
+        .models
+        .catalog
+        .iter()
+        .find(|model| model.slug == resolved_model)
+        .and_then(|model| model.apply_patch_upstream_strict)
+        .unwrap_or(false);
 
     MappingConfig {
         thinking_enabled: is_chat_shim
@@ -1856,6 +2042,7 @@ fn build_mapping_config(state: &AppState, resolved_model: &str) -> MappingConfig
         ),
         provider_kind: state.profile.kind().to_string(),
         apply_patch_upstream_tool_type,
+        apply_patch_upstream_strict,
     }
 }
 
@@ -2098,15 +2285,29 @@ fn validate_function_call_output(obj: &Map<String, Value>, path: &str) -> Result
                         "function_call_output parts must include a string 'type' field",
                     )
                 })?;
-                if part_type != "input_text" {
+                if !matches!(part_type, "input_text" | "input_image") {
                     return Err(ApiError::unsupported_content_part(part_type));
                 }
-                if part.get("text").and_then(|v| v.as_str()).is_none() {
-                    return Err(ApiError::invalid_parameter(
-                        format!("{path}.output[{idx}]"),
-                        "invalid_output_part",
-                        "function_call_output input_text parts must include string text",
-                    ));
+                match part_type {
+                    "input_text" => {
+                        if part.get("text").and_then(|v| v.as_str()).is_none() {
+                            return Err(ApiError::invalid_parameter(
+                                format!("{path}.output[{idx}]"),
+                                "invalid_output_part",
+                                "function_call_output input_text parts must include string text",
+                            ));
+                        }
+                    }
+                    "input_image" => {
+                        if part.get("image_url").is_none() {
+                            return Err(ApiError::invalid_parameter(
+                                format!("{path}.output[{idx}]"),
+                                "invalid_output_part",
+                                "function_call_output input_image parts must include image_url",
+                            ));
+                        }
+                    }
+                    _ => unreachable!(),
                 }
             }
             Ok(())
@@ -2217,6 +2418,7 @@ mod tests {
     fn relay_diagnostics_records_counts_and_annotations() {
         let mut diagnostics = RelayDiagnostics::default();
         diagnostics.record_upstream("chat.completion.chunk".into());
+        diagnostics.record_upstream_data(r#"{"object":"chat.completion.chunk"}"#);
         diagnostics.record_zero_event_chunk();
         diagnostics.record_unparseable();
         diagnostics.record_heartbeat();
@@ -2248,12 +2450,51 @@ mod tests {
     }
 
     #[test]
+    fn relay_diagnostics_stream_error_keeps_raw_sse_tail() {
+        let mut diagnostics = RelayDiagnostics::default();
+        diagnostics.record_upstream("chat.completion.chunk".into());
+        diagnostics.record_upstream_data(r#"{"object":"chat.completion.chunk","delta":"first"}"#);
+        diagnostics.record_stream_error(serde_json::json!({
+            "kind": "transport",
+            "classification": {
+                "is_timeout": false,
+                "is_decode": true,
+                "is_body": true,
+                "is_connect": false,
+                "is_request": false,
+                "is_status": false
+            }
+        }));
+
+        let detail = diagnostics.stream_error_detail.as_ref().unwrap();
+        assert_eq!(detail["kind"], "transport");
+        assert_eq!(
+            detail["upstream_raw_sse_tail"][0],
+            r#"{"object":"chat.completion.chunk","delta":"first"}"#
+        );
+        let annotations = diagnostics.annotations();
+        assert!(annotations.contains(&"relay.stream_error.is_decode=true".to_string()));
+        assert!(annotations.contains(&"relay.stream_error.is_body=true".to_string()));
+    }
+
+    #[test]
     fn relay_diagnostics_heartbeat_due_requires_prior_downstream_event() {
         let mut diagnostics = RelayDiagnostics::default();
         assert!(!diagnostics.heartbeat_due(Duration::from_secs(0)));
 
         diagnostics.record_downstream("response.created");
         assert!(diagnostics.heartbeat_due(Duration::from_secs(0)));
+    }
+
+    #[test]
+    fn validate_function_call_output_accepts_image_parts() {
+        let item = serde_json::json!({
+            "output": [
+                {"type": "input_text", "text": "screenshot"},
+                {"type": "input_image", "image_url": {"url": "data:image/png;base64,AAAA"}}
+            ]
+        });
+        validate_function_call_output(item.as_object().unwrap(), "input[0]").unwrap();
     }
 
     #[test]
