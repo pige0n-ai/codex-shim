@@ -19,6 +19,9 @@ server:
 upstream:
   base_url: "http://127.0.0.1:30000/v1"
   chat_path: "/chat/completions"
+  max_retries: 2
+  stream_max_retries: 2
+  downstream_heartbeat_seconds: 30
 
 provider:
   kind: sglang-chat
@@ -38,8 +41,10 @@ models:
   catalog:
     - slug: "deepseek-ai/DeepSeek-V3.1"
       context_window: 131072
+      apply_patch_tool_type: freeform
 
 state:
   backend: memory
+  failed_debug_artifact_ttl_seconds: 0
 logging:
   level: info

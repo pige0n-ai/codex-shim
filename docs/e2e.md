@@ -89,12 +89,31 @@ cargo test -p e2e-codex --test codex_live live_provider_differential_matrix -- -
 | `direct_chat_stream_basic` | Chat SSE stream → Responses SSE | No |
 | `direct_unsupported_fields_fail_closed` | `background: true` → 400 not_implemented | No |
 | `direct_truncation_field_rejected` | `truncation` → 400 not_implemented | No |
+| `direct_conversation_field_rejected` | Unsupported `conversation` field fails closed | No |
 | `direct_native_stream_store_id` | Native Responses stream stores upstream response id | No |
 | `direct_native_stream_abnormal_end` | Abnormal stream doesn't write store record | No |
 | `direct_stateless_previous_response_id_materialization` | previous_response_id materializes history | No |
+| `direct_deepseek_reasoning_recovery_preserves_tool_reasoning` | Stored DeepSeek reasoning survives tool-call turns | No |
+| `direct_tool_call_adjacency_reorders_intervening_messages` | Chat history keeps assistant/tool adjacency valid | No |
+| `direct_parallel_tool_calls_grouped_and_outputs_ordered` | Parallel tool calls and outputs are grouped for chat history | No |
+| `direct_chat_stream_retries_initial_429` | Streaming chat retries initial retryable upstream failures | No |
+| `direct_chat_stream_reasoning_only_chunks_emit_downstream_heartbeat` | Heartbeat protects reasoning-only streams from idle timeout | No |
+| `direct_chat_stream_downstream_heartbeat_can_be_disabled` | `downstream_heartbeat_seconds: 0` disables heartbeat emission | No |
+| `direct_chat_stream_usage_only_chunk_can_emit_heartbeat_and_preserves_usage` | Usage-only chunks can heartbeat without losing usage accounting | No |
+| `direct_chat_stream_custom_tool_argument_chunks_emit_heartbeat_without_partial_input` | Custom/freeform tool argument accumulation can heartbeat safely | No |
+| `direct_chat_stream_mapper_failure_persists_debug_artifact` | Mapper failures persist failed-stream debug artifacts | No |
 | `direct_upstream_401` | Upstream 401 propagated to client | No |
+| `direct_include_field_is_rejected_fail_closed` | Unsupported `include` field fails closed | No |
+| `direct_unknown_top_level_field_rejected` | Unknown top-level fields fail closed | No |
+| `direct_unknown_input_item_type_rejected` | Unknown input item types fail closed | No |
+| `direct_invalid_raw_input_object_rejected` | Invalid raw input object shape fails closed | No |
+| `direct_models_returns_shim_native_catalog` | `/models` returns the generated Codex catalog metadata | No |
+| `direct_compact_endpoint_not_implemented` | Unsupported compact endpoint returns not implemented | No |
+| `direct_memory_summarize_endpoint_not_implemented` | Unsupported memory summarize endpoint returns not implemented | No |
 | `codex_mock_chat_stream_basic` | Full codex exec → shim → mock flow | **Yes** |
+| `codex_mock_model_base_instructions_reach_upstream_system_prompt` | Catalog base instructions reach upstream system prompts | **Yes** |
 | `codex_mock_request_builder_headers_query_auth` | Validate auth/headers/query params upstream | **Yes** |
+| `codex_mock_project_config_trusted_basic` | Project-scoped trusted desktop config works with Codex exec | **Yes** |
 
 ### Live Smoke (`codex_live.rs`)
 
@@ -102,6 +121,7 @@ cargo test -p e2e-codex --test codex_live live_provider_differential_matrix -- -
 |------|------------|
 | `live_provider_matrix_no_tool_smoke` | All enabled providers run "return CODEX_SHIM_E2E_OK" |
 | `live_provider_tool_smoke` | All enabled providers read a file via shell tool |
+| `live_provider_differential_matrix` | Compares enabled providers against an OpenAI baseline across tool, compaction, JSON, and file-edit scenarios |
 
 ## Secrets File Format
 

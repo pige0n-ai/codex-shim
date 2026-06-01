@@ -22,6 +22,7 @@ models:
   catalog:
     - slug: deepseek-v4-pro
       context_window: 131072
+      apply_patch_tool_type: freeform
 ```
 
 `provider.kind` picks from [27 built-in profiles](provider-compatibility.md).
@@ -57,7 +58,7 @@ provider:
     profile: deepseek-chat
     capabilities:
       supports_hosted_web_search: false
-      supports_streaming_usage: true
+      request_stream_usage: true
     extra_body:
       enable_thinking: true
 ```
@@ -84,6 +85,13 @@ exist, their capabilities, and context windows.
 - `reasoning_levels` — e.g. `[high, xhigh]`. Defaults from profile capabilities.
 - `tool_calling`, `vision` — default from profile capabilities.
 - `supports_search_tool` — must be `true` for hosted web search profiles.
+- `apply_patch_tool_type: freeform` — advertise Codex patch editing for
+  explicit catalog entries. Generated catalog entries set this automatically.
+- `apply_patch_upstream_tool_type: structured` — optional Chat Completions
+  upstream presentation for `apply_patch`; structured tool calls must include
+  `raw_patch`.
+- `apply_patch_upstream_strict` — optional `strict: true` upstream function
+  schema flag. Defaults to `false`.
 
 ### Alignment Rule
 
@@ -215,7 +223,7 @@ state:
   backend: memory             # memory/ram, or sqlite when the binary has sqlite support
   ttl_seconds: 86400          # runtime response state for continuation
   debug_artifact_ttl_seconds: 600  # raw debug artifacts; defaults to 10 minutes
-  failed_debug_artifact_ttl_seconds: 0  # optional; 0 keeps failed artifacts indefinitely
+  failed_debug_artifact_ttl_seconds: 0  # 0 keeps failed artifacts indefinitely
   sqlite_path: ~/.codex-shim/store.db  # optional; used only with backend: sqlite
 
 logging:
@@ -225,10 +233,11 @@ logging:
 Defaults work for most setups.
 For long benchmark runs, prefer `backend: sqlite`; raw request/SSE debug artifacts
 are kept separately from continuation state and expire after
-`debug_artifact_ttl_seconds`. Set `failed_debug_artifact_ttl_seconds` to a longer
-value when failed upstream/tool/stream attempts need to remain auditable after
-successful requests have expired; `0` means no automatic expiry for failed debug
-artifacts.
+`debug_artifact_ttl_seconds`. Failed artifacts default to
+`failed_debug_artifact_ttl_seconds: 0`, which means no automatic expiry, so
+upstream/tool/stream failures remain auditable after successful requests have
+expired. Set it to a positive value only when failed artifacts should be pruned
+automatically.
 
 ## Validation
 

@@ -5,6 +5,9 @@ server:
 upstream:
   base_url: "https://api.x.ai/v1"
   api_key_env: "XAI_API_KEY"
+  max_retries: 2
+  stream_max_retries: 2
+  downstream_heartbeat_seconds: 30
 provider:
   kind: xai-chat
   profile_config:
@@ -14,7 +17,9 @@ models:
   catalog:
     - slug: "grok-4.20-reasoning"
       context_window: 131072
+      apply_patch_tool_type: freeform
 state:
   backend: memory
+  failed_debug_artifact_ttl_seconds: 0
 logging:
   level: info

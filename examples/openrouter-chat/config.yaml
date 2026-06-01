@@ -6,6 +6,9 @@ upstream:
   base_url: "https://openrouter.ai/api/v1"
   chat_path: "/chat/completions"
   api_key_env: "OPENROUTER_API_KEY"
+  max_retries: 2
+  stream_max_retries: 2
+  downstream_heartbeat_seconds: 30
   # Optional: add your own attribution headers if desired.
   # http_headers:
   #   HTTP-Referer: "https://your-app.example"
@@ -20,7 +23,9 @@ models:
   catalog:
     - slug: "moonshotai/kimi-k2.6"
       context_window: 262144
+      apply_patch_tool_type: freeform
 state:
   backend: memory
+  failed_debug_artifact_ttl_seconds: 0
 logging:
   level: info

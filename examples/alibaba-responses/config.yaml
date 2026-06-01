@@ -15,8 +15,10 @@ models:
   catalog:
     - slug: "qwen3.6-plus"
       context_window: 131072
+      apply_patch_tool_type: freeform
 state:
   backend: memory
   ttl_seconds: 604800
+  failed_debug_artifact_ttl_seconds: 0
 logging:
   level: info

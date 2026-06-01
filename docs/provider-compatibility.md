@@ -60,3 +60,14 @@ Evidence links: [DeepSeek](https://api-docs.deepseek.com/api/create-chat-complet
   non-stateful — the shim materializes history for them.
 - `generic-chat` is for upstreams that are OpenAI-compatible enough to work with
   the chat shim. It's not a universal compatibility promise.
+- Chat-shim profiles share the same stream safety contract:
+  `stream_max_retries` applies only before downstream SSE has started, while
+  mid-stream failures become `response.failed` plus debug artifacts for Codex's
+  turn-level retry.
+- `downstream_heartbeat_seconds` applies to Chat Completions streams that are
+  still active upstream but have no relayable Responses event yet, such as
+  reasoning-only chunks, usage-only chunks, or accumulated custom/freeform tool
+  arguments.
+- Explicit catalog examples should set `apply_patch_tool_type: freeform` to
+  expose Codex patch editing. `apply_patch_upstream_tool_type: structured` is an
+  optional Chat Completions presentation, not a provider compatibility guarantee.

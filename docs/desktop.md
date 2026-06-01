@@ -8,10 +8,11 @@ Supported operating contract for using `codex-shim` with the Codex desktop app.
 - One project → one shim upstream
 - Stable provider identity: `model_provider = "codex_shim"`
 - Project-scoped config: `<repo>/.codex/config.toml`
-- Project-scoped catalog: `<repo>/.codex/codex-shim/model-catalog.json`
+- Project-scoped catalog: `<repo>/.codex/model-catalog-shim.json`
 - Trusted-project flow (`--trust-project`)
 - Shim-managed history/resume within the trusted project
-- `shell`, `apply_patch`, and standard function-tool flows
+- `shell`, `apply_patch`, Codex Desktop `custom`/freeform tools, and standard
+  function-tool flows
 
 Install and validate:
 
@@ -29,6 +30,10 @@ codex-shim doctor desktop \
 `doctor desktop` checks: project config, trust entry, stable `model_provider`
 and `model_catalog_json`, `wire_api = "responses"`, `supports_websockets = false`,
 and `web_search` compatibility.
+
+For explicit shim catalog entries, set `apply_patch_tool_type: freeform` when
+the desktop app should expose patch editing. The setup wizard and generated
+catalog command do this automatically for generated entries.
 
 ## Gated
 
