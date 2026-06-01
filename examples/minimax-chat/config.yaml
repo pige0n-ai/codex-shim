@@ -5,6 +5,9 @@ server:
 upstream:
   base_url: "https://api.minimaxi.com/v1"
   api_key_env: "MINIMAX_API_KEY"
+  max_retries: 2
+  stream_max_retries: 2
+  downstream_heartbeat_seconds: 30
 provider:
   kind: minimax-chat
   profile_config:
@@ -14,7 +17,9 @@ models:
   catalog:
     - slug: "MiniMax-M2.7"
       context_window: 204800
+      apply_patch_tool_type: freeform
 state:
   backend: memory
+  failed_debug_artifact_ttl_seconds: 0
 logging:
   level: info

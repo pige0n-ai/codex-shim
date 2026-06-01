@@ -305,7 +305,7 @@ pub struct StateConfig {
     pub ttl_seconds: u64,
     #[serde(default = "default_debug_artifact_ttl")]
     pub debug_artifact_ttl_seconds: u64,
-    #[serde(default)]
+    #[serde(default = "default_failed_debug_artifact_ttl")]
     pub failed_debug_artifact_ttl_seconds: Option<u64>,
     #[serde(default = "default_cleanup_interval")]
     pub cleanup_interval_seconds: u64,
@@ -377,6 +377,9 @@ fn default_ttl() -> u64 {
 }
 fn default_debug_artifact_ttl() -> u64 {
     600
+}
+fn default_failed_debug_artifact_ttl() -> Option<u64> {
+    Some(0)
 }
 fn default_cleanup_interval() -> u64 {
     3600
@@ -486,7 +489,7 @@ impl Default for StateConfig {
             backend: default_state_backend(),
             ttl_seconds: default_ttl(),
             debug_artifact_ttl_seconds: default_debug_artifact_ttl(),
-            failed_debug_artifact_ttl_seconds: Some(0),
+            failed_debug_artifact_ttl_seconds: default_failed_debug_artifact_ttl(),
             cleanup_interval_seconds: default_cleanup_interval(),
             sqlite_path: None,
         }
@@ -886,6 +889,20 @@ mod tests {
         let mut config = valid_config();
         config.state.failed_debug_artifact_ttl_seconds = Some(0);
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn partial_state_config_defaults_failed_debug_artifact_ttl_to_never_expire() {
+        let config: Config = serde_yaml::from_str(
+            r#"
+state:
+  backend: sqlite
+  debug_artifact_ttl_seconds: 600
+"#,
+        )
+        .expect("config should parse");
+
+        assert_eq!(config.state.failed_debug_artifact_ttl_seconds, Some(0));
     }
 
     #[test]

@@ -7,6 +7,9 @@ server:
 upstream:
   base_url: "https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1"
   api_key_env: "BEDROCK_API_KEY"
+  max_retries: 2
+  stream_max_retries: 2
+  downstream_heartbeat_seconds: 30
   auth_command:
     # Example placeholder: print a Bedrock API key from your own secret store.
     command: "/usr/local/bin/fetch-bedrock-api-key"
@@ -22,7 +25,9 @@ models:
   catalog:
     - slug: "amazon.nova-pro-v1:0"
       context_window: 131072
+      apply_patch_tool_type: freeform
 state:
   backend: memory
+  failed_debug_artifact_ttl_seconds: 0
 logging:
   level: info

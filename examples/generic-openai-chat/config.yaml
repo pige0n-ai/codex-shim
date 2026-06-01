@@ -46,11 +46,13 @@ models:
   catalog:
     - slug: "model-slug"
       context_window: 131072
+      apply_patch_tool_type: freeform
 
 state:
   backend: memory              # memory | sqlite
   ttl_seconds: 86400
   debug_artifact_ttl_seconds: 600
+  failed_debug_artifact_ttl_seconds: 0
   cleanup_interval_seconds: 3600
   # sqlite_path: "~/.codex-shim/store.db"
 

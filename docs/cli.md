@@ -10,10 +10,15 @@ codex-shim --config /path/to/config.yaml
 codex-shim --listen 0.0.0.0:8787
 ```
 
+If no subcommand is given, no `--config` path is provided, and the default
+`~/.codex-shim/config.yaml` does not exist, server mode launches the interactive
+`setup --yolo` first-run flow instead of failing immediately.
+
 ## `setup`
 
 Interactive setup wizard with step-by-step output. Walks through provider
-category, provider profile, API key, listen address, and model config.
+category, provider profile, API key, listen address, model config, and optional
+upstream connectivity probing.
 
 ```bash
 codex-shim setup                    # interactive, write config, print next steps
@@ -31,8 +36,15 @@ The wizard asks for:
 5. **Listen address** — host:port the shim server listens on. Written to
    `config.yaml` as `server.listen` and used as `base_url` in Codex `config.toml`.
    Default: `127.0.0.1:8787`.
-6. Model slug, context window (supports k/K/m/M suffixes), reasoning settings
+6. Model slug, context window (supports k/K/m/M suffixes), reasoning settings,
+   and Codex catalog metadata. Generated catalog entries enable
+   `apply_patch_tool_type: freeform`.
 7. Optional upstream connectivity probe
+
+Generated configs include the current streaming/debug defaults:
+`stream_max_retries: 2`, `downstream_heartbeat_seconds: 30`,
+`debug_artifact_ttl_seconds: 600`, and
+`failed_debug_artifact_ttl_seconds: 0`.
 
 ## `integrate`
 
@@ -77,6 +89,9 @@ Generate a model catalog JSON.
 codex-shim generate-catalog --config ~/.codex-shim/config.yaml
 codex-shim generate-catalog --config ... --output /tmp/catalog.json
 ```
+
+Generated catalog entries advertise `apply_patch_tool_type: freeform` by
+default so Codex can expose its patch editing tool for shell-capable models.
 
 ## `explain-catalog`
 

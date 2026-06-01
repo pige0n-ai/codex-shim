@@ -6,6 +6,9 @@ upstream:
   base_url: "https://api.fireworks.ai/inference/v1"
   chat_path: "/chat/completions"
   api_key_env: "FIREWORKS_API_KEY"
+  max_retries: 2
+  stream_max_retries: 2
+  downstream_heartbeat_seconds: 30
 provider:
   kind: fireworks-chat
   profile_config:
@@ -16,10 +19,12 @@ models:
   catalog:
     - slug: "accounts/fireworks/models/qwen3-235b-a22b"
       context_window: 131072
+      apply_patch_tool_type: freeform
       reasoning_levels:
         - xhigh
         - high
 state:
   backend: memory
+  failed_debug_artifact_ttl_seconds: 0
 logging:
   level: info

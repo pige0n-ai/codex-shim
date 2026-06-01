@@ -5,6 +5,9 @@ server:
 upstream:
   base_url: "https://api.moonshot.ai/v1"
   api_key_env: "MOONSHOT_API_KEY"
+  max_retries: 2
+  stream_max_retries: 2
+  downstream_heartbeat_seconds: 30
 provider:
   kind: moonshot-chat
   profile_config:
@@ -18,7 +21,9 @@ models:
   catalog:
     - slug: "kimi-k2.6"
       context_window: 262144
+      apply_patch_tool_type: freeform
 state:
   backend: memory
+  failed_debug_artifact_ttl_seconds: 0
 logging:
   level: info

@@ -218,6 +218,9 @@ state:
   backend: memory
   ttl_seconds: 86400
   debug_artifact_ttl_seconds: 600
+  # Failed raw request/SSE artifacts default to 0, meaning no automatic expiry.
+  # Set a positive value to prune failed artifacts after that many seconds.
+  failed_debug_artifact_ttl_seconds: 0
   cleanup_interval_seconds: 3600
   # Defaults to ~/.codex-shim/store.db on macOS/Linux and
   # %USERPROFILE%\.codex-shim\store.db on Windows when backend=sqlite.

@@ -7,6 +7,9 @@ server:
 upstream:
   base_url: "https://aiplatform.googleapis.com/v1/projects/YOUR_PROJECT_ID/locations/global/endpoints/openapi"
   api_key_env: "OPENAI_API_KEY"
+  max_retries: 2
+  stream_max_retries: 2
+  downstream_heartbeat_seconds: 30
   auth_command:
     command: "gcloud"
     args: ["auth", "application-default", "print-access-token"]
@@ -21,7 +24,9 @@ models:
   catalog:
     - slug: "gemini-2.5-flash"
       context_window: 131072
+      apply_patch_tool_type: freeform
 state:
   backend: memory
+  failed_debug_artifact_ttl_seconds: 0
 logging:
   level: info

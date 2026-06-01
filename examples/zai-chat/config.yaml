@@ -5,6 +5,9 @@ server:
 upstream:
   base_url: "https://api.z.ai/api/paas/v4"
   api_key_env: "ZAI_API_KEY"
+  max_retries: 2
+  stream_max_retries: 2
+  downstream_heartbeat_seconds: 30
 provider:
   kind: zai-chat
   profile_config:
@@ -17,7 +20,9 @@ models:
   catalog:
     - slug: "glm-5.1"
       context_window: 200000
+      apply_patch_tool_type: freeform
 state:
   backend: memory
+  failed_debug_artifact_ttl_seconds: 0
 logging:
   level: info

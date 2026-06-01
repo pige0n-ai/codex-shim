@@ -63,6 +63,7 @@ models:
   catalog:
     - slug: "deepseek-v4-pro"
       context_window: 1000000
+      apply_patch_tool_type: freeform
       # If omitted, reasoning_levels would default from the provider capability
       # preset. DeepSeek supports reasoning effort, so the derived default would
       # be ["high"].
@@ -74,6 +75,7 @@ state:
   backend: memory          # memory | sqlite
   ttl_seconds: 86400       # 24h
   debug_artifact_ttl_seconds: 600  # 10m raw debug artifacts
+  failed_debug_artifact_ttl_seconds: 0
   cleanup_interval_seconds: 3600
   # sqlite_path: "~/.codex-shim/store.db"
 

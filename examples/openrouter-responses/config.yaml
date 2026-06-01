@@ -46,10 +46,12 @@ models:
   catalog:
     - slug: "moonshotai/kimi-k2.6"
       context_window: 262144
+      apply_patch_tool_type: freeform
 
 state:
   backend: memory          # use sqlite for longer TTL
   ttl_seconds: 86400
+  failed_debug_artifact_ttl_seconds: 0
 
 logging:
   level: info
