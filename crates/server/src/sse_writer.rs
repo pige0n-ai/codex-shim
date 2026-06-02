@@ -60,6 +60,9 @@ fn sse_event_type(event: &ResponseSseEvent) -> &str {
         ResponseSseEvent::ResponseCustomToolCallInputDelta { .. } => {
             "response.custom_tool_call_input.delta"
         }
+        ResponseSseEvent::ResponseCustomToolCallInputDone { .. } => {
+            "response.custom_tool_call_input.done"
+        }
         ResponseSseEvent::ResponseCompleted { .. } => "response.completed",
         ResponseSseEvent::ResponseFailed { .. } => "response.failed",
         ResponseSseEvent::Error { .. } => "error",

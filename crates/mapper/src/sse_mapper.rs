@@ -546,7 +546,7 @@ impl StreamState {
                     item_id: tool.item_id.clone(),
                     output_index,
                     arguments: tool.arguments.clone(),
-                    name,
+                    name: Some(name),
                 });
             }
 
@@ -1026,22 +1026,23 @@ mod tests {
     fn added_position(events: &[ResponseSseEvent], item_type: &str) -> usize {
         events
             .iter()
-            .position(|event| match (item_type, event) {
-                (
-                    "message",
-                    ResponseSseEvent::ResponseOutputItemAdded {
-                        item: ResponseOutputItem::Message { .. },
-                        ..
-                    },
-                ) => true,
-                (
-                    "function_call",
-                    ResponseSseEvent::ResponseOutputItemAdded {
-                        item: ResponseOutputItem::FunctionCall { .. },
-                        ..
-                    },
-                ) => true,
-                _ => false,
+            .position(|event| {
+                matches!(
+                    (item_type, event),
+                    (
+                        "message",
+                        ResponseSseEvent::ResponseOutputItemAdded {
+                            item: ResponseOutputItem::Message { .. },
+                            ..
+                        },
+                    ) | (
+                        "function_call",
+                        ResponseSseEvent::ResponseOutputItemAdded {
+                            item: ResponseOutputItem::FunctionCall { .. },
+                            ..
+                        },
+                    )
+                )
             })
             .unwrap()
     }
@@ -1049,29 +1050,29 @@ mod tests {
     fn done_position(events: &[ResponseSseEvent], item_type: &str) -> usize {
         events
             .iter()
-            .position(|event| match (item_type, event) {
-                (
-                    "reasoning",
-                    ResponseSseEvent::ResponseOutputItemDone {
-                        item: ResponseOutputItem::Reasoning { .. },
-                        ..
-                    },
-                ) => true,
-                (
-                    "message",
-                    ResponseSseEvent::ResponseOutputItemDone {
-                        item: ResponseOutputItem::Message { .. },
-                        ..
-                    },
-                ) => true,
-                (
-                    "function_call",
-                    ResponseSseEvent::ResponseOutputItemDone {
-                        item: ResponseOutputItem::FunctionCall { .. },
-                        ..
-                    },
-                ) => true,
-                _ => false,
+            .position(|event| {
+                matches!(
+                    (item_type, event),
+                    (
+                        "reasoning",
+                        ResponseSseEvent::ResponseOutputItemDone {
+                            item: ResponseOutputItem::Reasoning { .. },
+                            ..
+                        },
+                    ) | (
+                        "message",
+                        ResponseSseEvent::ResponseOutputItemDone {
+                            item: ResponseOutputItem::Message { .. },
+                            ..
+                        },
+                    ) | (
+                        "function_call",
+                        ResponseSseEvent::ResponseOutputItemDone {
+                            item: ResponseOutputItem::FunctionCall { .. },
+                            ..
+                        },
+                    )
+                )
             })
             .unwrap()
     }

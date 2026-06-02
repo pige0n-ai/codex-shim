@@ -12,6 +12,7 @@ use providers::ProviderProfile;
 mod auth;
 pub mod codex_integration;
 pub mod config;
+mod responses_canonicalizer;
 mod routes;
 pub mod runtime_metrics;
 mod sse_writer;

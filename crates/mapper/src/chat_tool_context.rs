@@ -40,9 +40,8 @@ impl ChatToolContext {
     pub fn custom_tool_names(&self) -> BTreeSet<String> {
         self.specs_by_chat_name
             .iter()
-            .filter_map(|(name, spec)| {
-                matches!(spec.kind, ChatToolKind::Custom).then(|| name.clone())
-            })
+            .filter(|(_, spec)| matches!(spec.kind, ChatToolKind::Custom))
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
@@ -82,12 +81,21 @@ impl ChatToolContext {
             .get(&chat_name)
             .map(|spec| &spec.kind)
         {
+            Some(ChatToolKind::Custom) if status == "completed" => {
+                Ok(ResponseOutputItem::CustomToolCall {
+                    id,
+                    status,
+                    call_id,
+                    name: chat_name.clone(),
+                    input: custom_tool_input_from_arguments(&chat_name, &arguments)?,
+                })
+            }
             Some(ChatToolKind::Custom) => Ok(ResponseOutputItem::CustomToolCall {
                 id,
                 status,
                 call_id,
-                name: chat_name.clone(),
-                input: custom_tool_input_from_arguments(&chat_name, &arguments)?,
+                name: chat_name,
+                input: String::new(),
             }),
             Some(ChatToolKind::Namespace { namespace, name }) => {
                 Ok(ResponseOutputItem::FunctionCall {
@@ -178,7 +186,8 @@ impl ChatToolContext {
         let mut matches = self
             .namespace_name_to_chat_name
             .iter()
-            .filter_map(|((_, name), chat_name)| (name == child_name).then(|| chat_name.clone()));
+            .filter(|((_, name), _)| name == child_name)
+            .map(|(_, chat_name)| chat_name.clone());
         let first = matches.next()?;
         if matches.next().is_some() {
             None

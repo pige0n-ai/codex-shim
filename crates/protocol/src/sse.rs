@@ -102,7 +102,15 @@ pub enum ResponseSseEvent {
         item_id: String,
         output_index: u32,
         arguments: String,
-        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+
+    #[serde(rename = "response.custom_tool_call_input.done")]
+    ResponseCustomToolCallInputDone {
+        item_id: String,
+        output_index: u32,
+        input: String,
     },
 
     #[serde(rename = "response.custom_tool_call_input.delta")]

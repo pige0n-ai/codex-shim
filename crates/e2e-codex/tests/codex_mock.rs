@@ -1211,9 +1211,10 @@ async fn direct_chat_stream_downstream_heartbeat_can_be_disabled() {
 
     assert!(resp.status().is_success());
     let body = resp.text().await.unwrap();
-    assert!(
-        !body.contains("\"type\":\"response.in_progress\""),
-        "heartbeat should be disabled: {body}"
+    assert_eq!(
+        body.matches("\"type\":\"response.in_progress\"").count(),
+        1,
+        "heartbeat should be disabled while lifecycle in_progress remains: {body}"
     );
     assert!(
         body.contains("\"type\":\"response.completed\""),
