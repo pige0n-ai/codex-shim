@@ -15,7 +15,9 @@ pub struct ResponsesCanonicalizer {
     in_progress_sent: bool,
     completed: bool,
     next_output_index: u32,
+    next_done_sequence: u32,
     items: BTreeMap<String, ItemState>,
+    done_order: Vec<String>,
     ignored_events: Vec<String>,
 }
 
@@ -59,6 +61,7 @@ struct ItemState {
     custom_input: String,
     custom_input_seen: bool,
     done_item: Option<Value>,
+    done_sequence: Option<u32>,
 }
 
 impl ResponsesCanonicalizer {
@@ -199,9 +202,21 @@ impl ResponsesCanonicalizer {
             }
             "response.output_item.done" => {
                 self.capture_item_event(event, event.get("item"));
-                let state = self.item_for_event(event, None);
-                state.done_item = event.get("item").cloned();
-                apply_done_item(state)?;
+                let done_sequence = self.next_done_sequence;
+                let mut done_key = None;
+                {
+                    let state = self.item_for_event(event, None);
+                    state.done_item = event.get("item").cloned();
+                    apply_done_item(state)?;
+                    if state.done_sequence.is_none() {
+                        state.done_sequence = Some(done_sequence);
+                        done_key = Some(state.key.clone());
+                    }
+                }
+                if let Some(done_key) = done_key {
+                    self.next_done_sequence = self.next_done_sequence.saturating_add(1);
+                    self.done_order.push(done_key);
+                }
             }
             "response.completed" => {
                 self.capture_response(event.get("response"));
@@ -363,8 +378,8 @@ impl ResponsesCanonicalizer {
 
         let mut events = self.ensure_response_started()?;
         let mut outputs = Vec::new();
-        let states = self.ordered_item_keys();
-        let has_tool = states.iter().any(|key| {
+        let output_ordered_states = self.output_ordered_item_keys();
+        let has_tool = output_ordered_states.iter().any(|key| {
             self.items.get(key).is_some_and(|state| {
                 matches!(
                     state.kind,
@@ -372,7 +387,7 @@ impl ResponsesCanonicalizer {
                 )
             })
         });
-        let nonblank_non_tool = states.iter().any(|key| {
+        let nonblank_non_tool = output_ordered_states.iter().any(|key| {
             self.items.get(key).is_some_and(|state| match state.kind {
                 ItemKind::Message => !state.text.trim().is_empty(),
                 ItemKind::Reasoning => !state.reasoning_text.trim().is_empty(),
@@ -380,7 +395,7 @@ impl ResponsesCanonicalizer {
             })
         });
 
-        for key in states {
+        for key in self.canonical_item_keys(&output_ordered_states)? {
             let Some(state) = self.items.get(&key) else {
                 continue;
             };
@@ -426,7 +441,52 @@ impl ResponsesCanonicalizer {
         Ok(events)
     }
 
-    fn ordered_item_keys(&self) -> Vec<String> {
+    fn canonical_item_keys(&self, output_ordered_keys: &[String]) -> Result<Vec<String>, ApiError> {
+        let mut keys = Vec::new();
+        for key in output_ordered_keys {
+            if self
+                .items
+                .get(key)
+                .is_some_and(|state| matches!(state.kind, ItemKind::Reasoning))
+            {
+                keys.push(key.clone());
+            }
+        }
+
+        for key in &self.done_order {
+            if self
+                .items
+                .get(key)
+                .is_some_and(|state| !matches!(state.kind, ItemKind::Reasoning))
+                && !keys.contains(key)
+            {
+                keys.push(key.clone());
+            }
+        }
+
+        for key in output_ordered_keys {
+            if keys.contains(key) {
+                continue;
+            }
+            let Some(state) = self.items.get(key) else {
+                continue;
+            };
+            if matches!(
+                state.kind,
+                ItemKind::FunctionCall | ItemKind::CustomToolCall
+            ) {
+                return Err(ApiError::stream_interrupted_with_details(format!(
+                    "missing output_item.done for Responses tool item {}",
+                    state.key
+                )));
+            }
+            keys.push(key.clone());
+        }
+
+        Ok(keys)
+    }
+
+    fn output_ordered_item_keys(&self) -> Vec<String> {
         let mut keyed = self
             .items
             .values()
@@ -938,6 +998,7 @@ mod tests {
                 ResponseSseEvent::ResponseReasoningSummaryTextDelta { .. } => "reasoning.delta",
                 ResponseSseEvent::ResponseOutputTextDelta { .. } => "text.delta",
                 ResponseSseEvent::ResponseFunctionCallArgumentsDone { .. } => "function.done",
+                ResponseSseEvent::ResponseCustomToolCallInputDone { .. } => "custom.input.done",
                 ResponseSseEvent::ResponseOutputItemDone { item, .. } => match item {
                     ResponseOutputItem::Reasoning { .. } => "done.reasoning",
                     ResponseOutputItem::Message { .. } => "done.message",
@@ -975,6 +1036,92 @@ mod tests {
         assert!(!types.contains(&"done.message"));
         assert!(types.contains(&"reasoning.delta"));
         assert_eq!(types.last().copied(), Some("response.completed"));
+    }
+
+    #[test]
+    fn keeps_parallel_tool_done_order_ahead_of_late_message_done() {
+        let events = run(vec![
+            json!({"type":"response.created","response":{"id":"resp_fw","object":"response","created_at":1,"status":"in_progress","model":"m"}}),
+            json!({"type":"response.output_item.added","output_index":0,"item":{"id":"rs_1","type":"reasoning","status":"in_progress","summary":[]}}),
+            json!({"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":0,"summary_index":0,"delta":"Think."}),
+            json!({"type":"response.output_item.added","output_index":1,"item":{"id":"msg_1","type":"message","status":"in_progress","role":"assistant","content":[]}}),
+            json!({"type":"response.output_text.delta","item_id":"msg_1","output_index":1,"content_index":0,"delta":"I will inspect first.\n\n"}),
+            json!({"type":"response.output_item.added","output_index":2,"item":{"id":"fc_1","type":"function_call","status":"in_progress","call_id":"call_1","name":"exec_command","arguments":""}}),
+            json!({"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":2,"delta":"{\"cmd\":\"ls\"}"}),
+            json!({"type":"response.output_item.added","output_index":3,"item":{"id":"fc_2","type":"function_call","status":"in_progress","call_id":"call_2","name":"exec_command","arguments":""}}),
+            json!({"type":"response.function_call_arguments.delta","item_id":"fc_2","output_index":3,"delta":"{\"cmd\":\"pwd\"}"}),
+            json!({"type":"response.reasoning_summary_text.done","item_id":"rs_1","output_index":0,"summary_index":0,"text":"Think."}),
+            json!({"type":"response.reasoning_summary_part.done","item_id":"rs_1","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":"Think."}}),
+            json!({"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1","type":"reasoning","summary":[{"type":"summary_text","text":"Think."}]}}),
+            json!({"type":"response.output_text.done","item_id":"msg_1","output_index":1,"content_index":0,"text":"I will inspect first.\n\n"}),
+            json!({"type":"response.content_part.done","item_id":"msg_1","output_index":1,"content_index":0,"part":{"type":"output_text","text":"I will inspect first.\n\n","annotations":[]}}),
+            json!({"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":2,"arguments":"{\"cmd\":\"ls\"}"}),
+            json!({"type":"response.output_item.done","output_index":2,"item":{"id":"fc_1","type":"function_call","status":"completed","call_id":"call_1","name":"exec_command","arguments":"{\"cmd\":\"ls\"}"}}),
+            json!({"type":"response.function_call_arguments.done","item_id":"fc_2","output_index":3,"arguments":"{\"cmd\":\"pwd\"}"}),
+            json!({"type":"response.output_item.done","output_index":3,"item":{"id":"fc_2","type":"function_call","status":"completed","call_id":"call_2","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"}}),
+            json!({"type":"response.output_item.done","output_index":1,"item":{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"I will inspect first.\n\n","annotations":[]}]}}),
+            json!({"type":"response.completed","response":{"id":"resp_fw","object":"response","created_at":1,"status":"completed","model":"m"}}),
+        ])
+        .expect("canonicalized");
+
+        let types = event_types(&events);
+        let reasoning_done = types.iter().position(|t| *t == "done.reasoning").unwrap();
+        let first_function_done = types.iter().position(|t| *t == "done.function").unwrap();
+        let message_done = types.iter().position(|t| *t == "done.message").unwrap();
+        assert!(reasoning_done < first_function_done);
+        assert!(first_function_done < message_done);
+
+        let completed = events
+            .iter()
+            .find_map(|event| match event {
+                ResponseSseEvent::ResponseCompleted { response } => response.output.as_ref(),
+                _ => None,
+            })
+            .expect("completed output");
+        let output_types = completed
+            .iter()
+            .map(|item| match item {
+                ResponseOutputItem::Reasoning { .. } => "reasoning",
+                ResponseOutputItem::FunctionCall { .. } => "function_call",
+                ResponseOutputItem::Message { .. } => "message",
+                _ => "other",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            output_types,
+            vec!["reasoning", "function_call", "function_call", "message"]
+        );
+    }
+
+    #[test]
+    fn keeps_custom_tool_input_done_inside_tool_block() {
+        let events = run(vec![
+            json!({"type":"response.output_item.added","output_index":0,"item":{"id":"ctc_1","type":"custom_tool_call","status":"in_progress","call_id":"call_1","name":"apply_patch","input":""}}),
+            json!({"type":"response.custom_tool_call_input.delta","item_id":"ctc_1","output_index":0,"delta":"*** Begin Patch\n"}),
+            json!({"type":"response.custom_tool_call_input.done","item_id":"ctc_1","output_index":0,"input":"*** Begin Patch\n"}),
+            json!({"type":"response.output_item.done","output_index":0,"item":{"id":"ctc_1","type":"custom_tool_call","status":"completed","call_id":"call_1","name":"apply_patch","input":"*** Begin Patch\n"}}),
+            json!({"type":"response.completed","response":{"id":"resp","object":"response","created_at":1,"status":"completed","model":"m"}}),
+        ])
+        .expect("canonicalized");
+
+        let types = event_types(&events);
+        let input_done = types
+            .iter()
+            .position(|t| *t == "custom.input.done")
+            .unwrap();
+        let item_done = types.iter().position(|t| *t == "done.custom").unwrap();
+        assert!(input_done < item_done);
+    }
+
+    #[test]
+    fn fails_when_tool_item_never_finishes() {
+        let err = run(vec![
+            json!({"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","status":"in_progress","call_id":"call_1","name":"tool","arguments":""}}),
+            json!({"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":0,"arguments":"{}"}),
+            json!({"type":"response.completed","response":{"id":"resp","object":"response","created_at":1,"status":"completed","model":"m"}}),
+        ])
+        .expect_err("unfinished tool should fail closed");
+        assert_eq!(err.error.error_type, "stream_interrupted");
     }
 
     #[test]
