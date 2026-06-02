@@ -55,11 +55,15 @@ pub fn map_chat_response(
 
     let response_id = format!("resp_{}", uuid::Uuid::new_v4());
     let item_id = format!("msg_{}", uuid::Uuid::new_v4());
+    let tool_context = mapper::chat_tool_context::ChatToolContext::from_response_tools(
+        req.tools.as_deref().unwrap_or(&[]),
+    );
 
     let result = mapper::response_mapper::map_chat_response_to_responses(
         &chat,
         &response_id,
         &item_id,
+        &tool_context,
         &req,
         &mapping_config,
     )
@@ -82,7 +86,7 @@ pub fn process_sse_chunk(chunk_json: &str, state_json: &str) -> Result<String, J
         state.model,
         state.created_at,
         state.output_item_id,
-        std::collections::BTreeSet::new(),
+        mapper::chat_tool_context::ChatToolContext::default(),
     );
 
     let events = stream_state

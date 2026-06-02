@@ -243,6 +243,7 @@ async fn handle_non_stream(
         &chat_response,
         &mapped.response_id,
         mapped.output_item_ids.first().unwrap_or(&String::new()),
+        &mapped.tool_context,
         &req,
         &mapping_config,
     )
@@ -441,6 +442,7 @@ async fn handle_stream(
     let sent_messages = chat_req.messages.clone();
     let previous_response_id = _req.previous_response_id.clone();
     let mapped_request_json_for_store = mapped_request_json.clone();
+    let tool_context = mapped.tool_context.clone();
     let heartbeat_interval = match state.config.upstream.downstream_heartbeat_seconds {
         0 => None,
         seconds => Some(Duration::from_secs(seconds)),
@@ -456,7 +458,7 @@ async fn handle_stream(
             model.clone(),
             created_at,
             output_item_id.clone(),
-            mapper::custom_tools::custom_tool_names(_req.tools.as_deref().unwrap_or(&[])),
+            tool_context,
         );
 
         futures::pin_mut!(sse_stream);
@@ -857,14 +859,42 @@ async fn handle_stream(
 
         // Build canonical messages from sent messages + synthesized assistant response
         let output_text = stream_state.accumulated_text.clone();
+        let tool_calls = if stream_state.tool_call_active {
+            match stream_state.chat_tool_calls() {
+                Ok(tool_calls) => Some(tool_calls),
+                Err(error) => {
+                    emit_stream_failure(
+                        &tx,
+                        &mut response_sse_events,
+                        &mut relay_diagnostics,
+                        response_id.clone(),
+                        model.clone(),
+                        created_at,
+                        error,
+                    )
+                    .await;
+                    persist_stream_failure(
+                        &store,
+                        response_id,
+                        model,
+                        created_at,
+                        req_json,
+                        mapped_request_json_for_store,
+                        previous_response_id,
+                        sent_messages,
+                        upstream_sse_events,
+                        response_sse_events,
+                        &relay_diagnostics,
+                    );
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let mut canonical = sent_messages;
-        let has_content = !output_text.is_empty() || stream_state.tool_call_active;
+        let has_content = !output_text.is_empty() || tool_calls.is_some();
         if has_content {
-            let tool_calls = if stream_state.tool_call_active {
-                Some(stream_state.chat_tool_calls())
-            } else {
-                None
-            };
             let text_content = if output_text.is_empty() {
                 None
             } else {
@@ -1223,6 +1253,18 @@ fn response_sse_event_type(event: &ResponseSseEvent) -> &'static str {
         ResponseSseEvent::ResponseCreated { .. } => "response.created",
         ResponseSseEvent::ResponseInProgress { .. } => "response.in_progress",
         ResponseSseEvent::ResponseOutputItemAdded { .. } => "response.output_item.added",
+        ResponseSseEvent::ResponseReasoningSummaryPartAdded { .. } => {
+            "response.reasoning_summary_part.added"
+        }
+        ResponseSseEvent::ResponseReasoningSummaryTextDelta { .. } => {
+            "response.reasoning_summary_text.delta"
+        }
+        ResponseSseEvent::ResponseReasoningSummaryTextDone { .. } => {
+            "response.reasoning_summary_text.done"
+        }
+        ResponseSseEvent::ResponseReasoningSummaryPartDone { .. } => {
+            "response.reasoning_summary_part.done"
+        }
         ResponseSseEvent::ResponseContentPartAdded { .. } => "response.content_part.added",
         ResponseSseEvent::ResponseOutputTextDelta { .. } => "response.output_text.delta",
         ResponseSseEvent::ResponseOutputTextDone { .. } => "response.output_text.done",
@@ -1236,6 +1278,9 @@ fn response_sse_event_type(event: &ResponseSseEvent) -> &'static str {
         }
         ResponseSseEvent::ResponseCustomToolCallInputDelta { .. } => {
             "response.custom_tool_call_input.delta"
+        }
+        ResponseSseEvent::ResponseCustomToolCallInputDone { .. } => {
+            "response.custom_tool_call_input.done"
         }
         ResponseSseEvent::ResponseCompleted { .. } => "response.completed",
         ResponseSseEvent::ResponseFailed { .. } => "response.failed",
@@ -1746,6 +1791,7 @@ async fn handle_native_responses(
     if canonical.stream {
         // SSE proxy
         let response_id = format!("resp_{}", uuid::Uuid::new_v4());
+        let created_at = chrono::Utc::now().timestamp();
         let (tx, rx) = tokio::sync::mpsc::channel::<
             Result<protocol::sse::ResponseSseEvent, std::convert::Infallible>,
         >(64);
@@ -1768,27 +1814,77 @@ async fn handle_native_responses(
             let mut response_sse_events: Vec<serde_json::Value> = Vec::new();
             let mut saw_completed = false;
             let mut completed_event: Option<protocol::sse::ResponseSseEvent> = None;
+            let mut canonicalizer = crate::responses_canonicalizer::ResponsesCanonicalizer::new(
+                response_id.clone(),
+                resolved.clone(),
+                created_at,
+            );
             while let Some(Ok(event)) = sse_stream.next().await {
                 upstream_sse_events.push(
                     serde_json::from_str::<serde_json::Value>(&event.data)
                         .unwrap_or_else(|_| serde_json::json!({ "data": event.data.clone() })),
                 );
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&event.data) {
-                    if parsed["type"] == "response.completed" {
-                        response_body = parsed["response"].clone();
-                        saw_completed = true;
-                    }
-                    if let Ok(sse_event) =
-                        serde_json::from_value::<protocol::sse::ResponseSseEvent>(parsed.clone())
-                    {
-                        response_sse_events.push(parsed);
-                        if matches!(
-                            sse_event,
-                            protocol::sse::ResponseSseEvent::ResponseCompleted { .. }
-                        ) {
-                            completed_event = Some(sse_event);
-                        } else {
-                            let _ = tx.send(Ok(sse_event)).await;
+                    match canonicalizer.process_event(&parsed) {
+                        Ok(outcome) => {
+                            for sse_event in outcome.events {
+                                match sse_event_to_value(&sse_event) {
+                                    Ok(event_json) => response_sse_events.push(event_json),
+                                    Err(error) => {
+                                        tracing::error!(
+                                            %error,
+                                            "Failed to serialize canonical Responses SSE event"
+                                        );
+                                    }
+                                }
+                                if let protocol::sse::ResponseSseEvent::ResponseCompleted {
+                                    response,
+                                } = &sse_event
+                                {
+                                    saw_completed = true;
+                                    response_body = serde_json::to_value(response)
+                                        .unwrap_or(serde_json::Value::Null);
+                                    completed_event = Some(sse_event);
+                                } else {
+                                    let _ = tx.send(Ok(sse_event)).await;
+                                }
+                            }
+                            if let Some(response) = outcome.completed_response
+                                && response_body.is_null()
+                            {
+                                response_body = response;
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error.error.message,
+                                "Native Responses stream failed canonicalization"
+                            );
+                            for event in stream_failure_events(
+                                response_id.clone(),
+                                resolved.clone(),
+                                created_at,
+                                error,
+                            ) {
+                                if let Ok(event_json) = sse_event_to_value(&event) {
+                                    response_sse_events.push(event_json);
+                                }
+                                let _ = tx.send(Ok(event)).await;
+                            }
+                            persist_stream_failure(
+                                &store,
+                                response_id,
+                                resolved,
+                                created_at,
+                                req_json,
+                                body.clone(),
+                                previous_response_id,
+                                canonical.into_canonical_messages(),
+                                upstream_sse_events,
+                                response_sse_events,
+                                &RelayDiagnostics::default(),
+                            );
+                            return;
                         }
                     }
                 }
@@ -1796,6 +1892,33 @@ async fn handle_native_responses(
 
             // Only write store if we saw a completed event
             if !saw_completed {
+                if let Err(error) = canonicalizer.finish_stream() {
+                    for event in stream_failure_events(
+                        response_id.clone(),
+                        resolved.clone(),
+                        created_at,
+                        error,
+                    ) {
+                        if let Ok(event_json) = sse_event_to_value(&event) {
+                            response_sse_events.push(event_json);
+                        }
+                        let _ = tx.send(Ok(event)).await;
+                    }
+                    persist_stream_failure(
+                        &store,
+                        response_id,
+                        resolved,
+                        created_at,
+                        req_json,
+                        body.clone(),
+                        previous_response_id,
+                        canonical.into_canonical_messages(),
+                        upstream_sse_events,
+                        response_sse_events,
+                        &RelayDiagnostics::default(),
+                    );
+                    return;
+                }
                 tracing::error!(
                     "Native stream ended without response.completed; not writing store record"
                 );
@@ -1815,7 +1938,19 @@ async fn handle_native_responses(
                     &response_body,
                 )
             };
-            let debug_annotations = debug_annotations_for_request(&req_json);
+            let mut debug_annotations = debug_annotations_for_request(&req_json);
+            if !canonicalizer.ignored_events().is_empty() {
+                let ignored = canonicalizer
+                    .ignored_events()
+                    .iter()
+                    .take(20)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                debug_annotations.push(format!(
+                    "native Responses canonicalizer ignored upstream event types: {ignored}"
+                ));
+            }
 
             let mapped_request_json = body.clone();
             if let Err(error) = store.put_response_state(ResponseState {
@@ -1891,6 +2026,7 @@ async fn handle_native_responses(
             .json()
             .await
             .map_err(|e| record_error(ApiError::upstream_error(format!("{e}"))))?;
+        validate_responses_output_shape(&response_body).map_err(&record_error)?;
 
         let response_id = response_body["id"]
             .as_str()
@@ -2365,6 +2501,48 @@ fn validate_reasoning_item(obj: &Map<String, Value>, path: &str) -> Result<(), A
                     format!("reasoning summary part type '{part_type}' is not supported"),
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_responses_output_shape(response: &Value) -> Result<(), ApiError> {
+    let Some(output) = response.get("output") else {
+        return Ok(());
+    };
+    let items = output.as_array().ok_or_else(|| {
+        ApiError::invalid_parameter(
+            "response.output",
+            "invalid_response_output",
+            "response.output must be an array",
+        )
+    })?;
+    for (idx, item) in items.iter().enumerate() {
+        let item_type = item.get("type").and_then(Value::as_str);
+        match item_type {
+            Some("function_call") => {
+                for field in ["name", "call_id", "arguments"] {
+                    if !item.get(field).is_some_and(Value::is_string) {
+                        return Err(ApiError::invalid_parameter(
+                            format!("response.output[{idx}].{field}"),
+                            "invalid_response_output",
+                            format!("function_call output item must include string '{field}'"),
+                        ));
+                    }
+                }
+            }
+            Some("custom_tool_call") => {
+                for field in ["name", "call_id", "input"] {
+                    if !item.get(field).is_some_and(Value::is_string) {
+                        return Err(ApiError::invalid_parameter(
+                            format!("response.output[{idx}].{field}"),
+                            "invalid_response_output",
+                            format!("custom_tool_call output item must include string '{field}'"),
+                        ));
+                    }
+                }
+            }
+            _ => {}
         }
     }
     Ok(())

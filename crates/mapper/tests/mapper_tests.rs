@@ -668,10 +668,14 @@ mod tests {
             system_fingerprint: None,
         };
 
+        let tool_context = chat_tool_context::ChatToolContext::from_response_tools(
+            req.tools.as_deref().unwrap_or(&[]),
+        );
         let response = response_mapper::map_chat_response_to_responses(
             &chat,
             "resp_1",
             "out_1",
+            &tool_context,
             &req,
             &default_config(),
         )
@@ -748,10 +752,14 @@ mod tests {
             system_fingerprint: None,
         };
 
+        let tool_context = chat_tool_context::ChatToolContext::from_response_tools(
+            req.tools.as_deref().unwrap_or(&[]),
+        );
         let response = response_mapper::map_chat_response_to_responses(
             &chat,
             "resp_1",
             "out_1",
+            &tool_context,
             &req,
             &MappingConfig {
                 apply_patch_upstream_tool_type: apply_patch_tool::APPLY_PATCH_UPSTREAM_STRUCTURED

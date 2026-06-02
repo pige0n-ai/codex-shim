@@ -34,6 +34,18 @@ fn sse_event_type(event: &ResponseSseEvent) -> &str {
         ResponseSseEvent::ResponseCreated { .. } => "response.created",
         ResponseSseEvent::ResponseInProgress { .. } => "response.in_progress",
         ResponseSseEvent::ResponseOutputItemAdded { .. } => "response.output_item.added",
+        ResponseSseEvent::ResponseReasoningSummaryPartAdded { .. } => {
+            "response.reasoning_summary_part.added"
+        }
+        ResponseSseEvent::ResponseReasoningSummaryTextDelta { .. } => {
+            "response.reasoning_summary_text.delta"
+        }
+        ResponseSseEvent::ResponseReasoningSummaryTextDone { .. } => {
+            "response.reasoning_summary_text.done"
+        }
+        ResponseSseEvent::ResponseReasoningSummaryPartDone { .. } => {
+            "response.reasoning_summary_part.done"
+        }
         ResponseSseEvent::ResponseContentPartAdded { .. } => "response.content_part.added",
         ResponseSseEvent::ResponseOutputTextDelta { .. } => "response.output_text.delta",
         ResponseSseEvent::ResponseOutputTextDone { .. } => "response.output_text.done",
@@ -47,6 +59,9 @@ fn sse_event_type(event: &ResponseSseEvent) -> &str {
         }
         ResponseSseEvent::ResponseCustomToolCallInputDelta { .. } => {
             "response.custom_tool_call_input.delta"
+        }
+        ResponseSseEvent::ResponseCustomToolCallInputDone { .. } => {
+            "response.custom_tool_call_input.done"
         }
         ResponseSseEvent::ResponseCompleted { .. } => "response.completed",
         ResponseSseEvent::ResponseFailed { .. } => "response.failed",
