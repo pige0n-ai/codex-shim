@@ -118,11 +118,11 @@ impl ResponsesCanonicalizer {
             }
             "response.content_part.done" => {
                 let state = self.item_for_event(event, Some(ItemKind::Message));
-                if let Some(part) = event.get("part") {
-                    if let Some(text) = content_part_text(part) {
-                        state.text = text;
-                        state.text_seen = true;
-                    }
+                if let Some(part) = event.get("part")
+                    && let Some(text) = content_part_text(part)
+                {
+                    state.text = text;
+                    state.text_seen = true;
                 }
             }
             "response.reasoning_summary_part.added" => {
@@ -152,10 +152,10 @@ impl ResponsesCanonicalizer {
             "response.reasoning_summary_part.done" => {
                 let state = self.item_for_event(event, Some(ItemKind::Reasoning));
                 state.kind = ItemKind::Reasoning;
-                if let Some(part) = event.get("part") {
-                    if let Some(text) = summary_part_text(part) {
-                        state.reasoning_text = text;
-                    }
+                if let Some(part) = event.get("part")
+                    && let Some(text) = summary_part_text(part)
+                {
+                    state.reasoning_text = text;
                 }
             }
             "response.function_call_arguments.delta" => {
@@ -228,7 +228,7 @@ impl ResponsesCanonicalizer {
             return Ok(Vec::new());
         }
         Err(ApiError::stream_interrupted_with_details(
-            "native Responses stream ended before response.completed",
+            "native Responses stream ended before completion event",
         ))
     }
 

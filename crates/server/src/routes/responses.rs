@@ -1813,16 +1813,16 @@ async fn handle_native_responses(
                                 {
                                     saw_completed = true;
                                     response_body = serde_json::to_value(response)
-                                        .unwrap_or_else(|_| serde_json::Value::Null);
+                                        .unwrap_or(serde_json::Value::Null);
                                     completed_event = Some(sse_event);
                                 } else {
                                     let _ = tx.send(Ok(sse_event)).await;
                                 }
                             }
-                            if let Some(response) = outcome.completed_response {
-                                if response_body.is_null() {
-                                    response_body = response;
-                                }
+                            if let Some(response) = outcome.completed_response
+                                && response_body.is_null()
+                            {
+                                response_body = response;
                             }
                         }
                         Err(error) => {
