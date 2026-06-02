@@ -6,9 +6,8 @@ use protocol::responses::{
 };
 
 use crate::MappingConfig;
-use crate::custom_tools::{
-    custom_tool_arguments, custom_tool_input_from_arguments, custom_tool_names,
-};
+use crate::chat_tool_context::{ChatToolContext, flatten_namespace_tool_name};
+use crate::custom_tools::custom_tool_arguments;
 use crate::tool_call_normalizer::normalize_chat_tool_calls;
 
 /// Map an upstream Chat Completions response back to a Responses API object.
@@ -16,6 +15,7 @@ pub fn map_chat_response_to_responses(
     chat: &ChatCompletionResponse,
     response_id: &str,
     output_item_id: &str,
+    tool_context: &ChatToolContext,
     original_req: &ResponsesCreateRequest,
     _config: &MappingConfig,
 ) -> Result<ResponsesObject, ApiError> {
@@ -43,38 +43,15 @@ pub fn map_chat_response_to_responses(
         });
     }
 
-    // 2. Emit tool call items
-    let custom_names = original_req
-        .tools
-        .as_deref()
-        .map(custom_tool_names)
+    let normalized_tool_calls = msg
+        .tool_calls
+        .as_ref()
+        .map(|tool_calls| normalize_chat_tool_calls(tool_calls))
         .unwrap_or_default();
-    if let Some(tool_calls) = &msg.tool_calls {
-        for tc in normalize_chat_tool_calls(tool_calls) {
-            let fn_name = tc.function.name.clone().unwrap_or_default();
-            if custom_names.contains(&fn_name) {
-                output.push(ResponseOutputItem::CustomToolCall {
-                    id: format!("fc_{}", uuid::Uuid::new_v4()),
-                    status: "completed".into(),
-                    call_id: tc.id.clone(),
-                    name: fn_name.clone(),
-                    input: custom_tool_input_from_arguments(&fn_name, &tc.function.arguments)?,
-                });
-            } else {
-                output.push(ResponseOutputItem::FunctionCall {
-                    id: format!("fc_{}", uuid::Uuid::new_v4()),
-                    status: "completed".into(),
-                    call_id: tc.id.clone(),
-                    name: fn_name,
-                    arguments: tc.function.arguments.clone(),
-                });
-            }
-        }
-    }
 
-    // 3. Emit message item (if there's text content, or no tool calls)
+    // 2. Emit message item (if there's text content, or no tool calls)
     let text_content = extract_text_content(&msg.content);
-    let output_text = if text_content.is_some() || output.is_empty() {
+    let output_text = if text_content.is_some() || normalized_tool_calls.is_empty() {
         let text = text_content.clone().unwrap_or_default();
         output.push(ResponseOutputItem::Message {
             id: output_item_id.to_string(),
@@ -89,6 +66,30 @@ pub fn map_chat_response_to_responses(
     } else {
         text_content.unwrap_or_default()
     };
+
+    // 3. Emit tool call items
+    for tc in normalized_tool_calls {
+        let fn_name = tc
+            .function
+            .name
+            .clone()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                ApiError::upstream_error("chat completion tool call missing required function.name")
+            })?;
+        if tc.id.is_empty() {
+            return Err(ApiError::upstream_error(
+                "chat completion tool call missing required id",
+            ));
+        }
+        output.push(tool_context.output_item(
+            format!("fc_{}", uuid::Uuid::new_v4()),
+            "completed".into(),
+            tc.id,
+            fn_name,
+            tc.function.arguments,
+        )?);
+    }
 
     Ok(ResponsesObject {
         id: response_id.to_string(),
@@ -227,13 +228,18 @@ pub fn build_responses_canonical_messages(
                     {
                         let call_id = item.get("call_id").and_then(|c| c.as_str()).unwrap_or("");
                         let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                        let name = item
+                            .get("namespace")
+                            .and_then(|n| n.as_str())
+                            .map(|namespace| flatten_namespace_tool_name(namespace, name))
+                            .unwrap_or_else(|| name.to_string());
                         let arguments =
                             item.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
                         tool_calls.push(protocol::chat::ChatToolCall {
                             id: call_id.to_string(),
                             call_type: "function".to_string(),
                             function: protocol::chat::ChatFunctionCall {
-                                name: Some(name.to_string()),
+                                name: Some(name),
                                 arguments: arguments.to_string(),
                             },
                         });
@@ -271,6 +277,34 @@ pub fn build_responses_canonical_messages(
                         reasoning_content: pending_reasoning.take(),
                     });
                 }
+                Some("tool_search_call") => {
+                    let mut tool_calls = Vec::new();
+                    while let Some(item) = output.get(i)
+                        && item.get("type").and_then(|t| t.as_str()) == Some("tool_search_call")
+                    {
+                        let call_id = item.get("call_id").and_then(|c| c.as_str()).unwrap_or("");
+                        let arguments = item
+                            .get("arguments")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({}))
+                            .to_string();
+                        tool_calls.push(protocol::chat::ChatToolCall {
+                            id: call_id.to_string(),
+                            call_type: "function".to_string(),
+                            function: protocol::chat::ChatFunctionCall {
+                                name: Some("tool_search".to_string()),
+                                arguments,
+                            },
+                        });
+                        i += 1;
+                    }
+                    msgs.push(protocol::chat::ChatMessage::Assistant {
+                        content: None,
+                        name: None,
+                        tool_calls: Some(tool_calls),
+                        reasoning_content: pending_reasoning.take(),
+                    });
+                }
                 _ => {
                     i += 1;
                 }
@@ -284,6 +318,8 @@ pub fn build_responses_canonical_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::chat::{ChatCompletionChoice, ChatCompletionMessage};
+    use protocol::responses::{CustomToolFormat, ResponseInput, ResponseTool};
 
     #[test]
     fn responses_canonical_messages_group_parallel_function_calls() {
@@ -323,6 +359,233 @@ mod tests {
                 assert_eq!(tool_calls[1].id, "call_b");
             }
             other => panic!("expected grouped assistant tool calls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_streaming_content_and_tool_calls_include_both_items() {
+        let context = ChatToolContext::default();
+        let response = chat_response(
+            Some("checking"),
+            Some(vec![chat_tool_call("call_1", "lookup", "{\"q\":\"x\"}")]),
+            None,
+        );
+
+        let mapped = map_chat_response_to_responses(
+            &response,
+            "resp_test",
+            "msg_test",
+            &context,
+            &default_request(None),
+            &MappingConfig::default(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            mapped.output[0],
+            ResponseOutputItem::Message { .. }
+        ));
+        assert!(matches!(
+            mapped.output[1],
+            ResponseOutputItem::FunctionCall { .. }
+        ));
+        assert_eq!(mapped.output_text.as_deref(), Some("checking"));
+    }
+
+    #[test]
+    fn non_streaming_reasoning_precedes_message_and_tool_items() {
+        let context = ChatToolContext::default();
+        let response = chat_response(
+            Some("checking"),
+            Some(vec![chat_tool_call("call_1", "lookup", "{\"q\":\"x\"}")]),
+            Some("think"),
+        );
+
+        let mapped = map_chat_response_to_responses(
+            &response,
+            "resp_test",
+            "msg_test",
+            &context,
+            &default_request(None),
+            &MappingConfig::default(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            mapped.output[0],
+            ResponseOutputItem::Reasoning { .. }
+        ));
+        assert!(matches!(
+            mapped.output[1],
+            ResponseOutputItem::Message { .. }
+        ));
+        assert!(matches!(
+            mapped.output[2],
+            ResponseOutputItem::FunctionCall { .. }
+        ));
+    }
+
+    #[test]
+    fn non_streaming_custom_tool_requires_exact_string_input() {
+        let tools = vec![ResponseTool::Custom {
+            name: "apply_patch".into(),
+            description: "Apply a patch".into(),
+            format: CustomToolFormat {
+                format_type: "grammar".into(),
+                syntax: "lark".into(),
+                definition: "start: /.+/".into(),
+            },
+        }];
+        let context = ChatToolContext::from_response_tools(&tools);
+        let response = chat_response(
+            None,
+            Some(vec![chat_tool_call(
+                "call_1",
+                "apply_patch",
+                "{\"input\":\"patch\"}",
+            )]),
+            None,
+        );
+
+        let mapped = map_chat_response_to_responses(
+            &response,
+            "resp_test",
+            "msg_test",
+            &context,
+            &default_request(Some(tools.clone())),
+            &MappingConfig::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            &mapped.output[0],
+            ResponseOutputItem::CustomToolCall { input, .. } if input == "patch"
+        ));
+
+        let bad_response = chat_response(
+            None,
+            Some(vec![chat_tool_call(
+                "call_1",
+                "apply_patch",
+                "{\"input\":1}",
+            )]),
+            None,
+        );
+        let err = map_chat_response_to_responses(
+            &bad_response,
+            "resp_test",
+            "msg_test",
+            &context,
+            &default_request(Some(tools)),
+            &MappingConfig::default(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("must be a string"));
+    }
+
+    #[test]
+    fn non_streaming_namespace_and_tool_search_restore_through_context() {
+        let tools = vec![
+            ResponseTool::Namespace {
+                name: "functions".into(),
+                description: "Functions".into(),
+                tools: vec![protocol::responses::NamespaceTool::Function {
+                    name: "exec_command".into(),
+                    description: Some("Run a command".into()),
+                    parameters: Some(serde_json::json!({"type": "object"})),
+                    strict: Some(false),
+                }],
+            },
+            ResponseTool::ToolSearch { description: None },
+        ];
+        let context = ChatToolContext::from_response_tools(&tools);
+        let response = chat_response(
+            None,
+            Some(vec![
+                chat_tool_call("call_1", "functions___exec_command", "{\"cmd\":\"date\"}"),
+                chat_tool_call("call_2", "tool_search", "{\"query\":\"rg\"}"),
+            ]),
+            None,
+        );
+
+        let mapped = map_chat_response_to_responses(
+            &response,
+            "resp_test",
+            "msg_test",
+            &context,
+            &default_request(Some(tools)),
+            &MappingConfig::default(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            &mapped.output[0],
+            ResponseOutputItem::FunctionCall {
+                namespace: Some(namespace),
+                name,
+                ..
+            } if namespace == "functions" && name == "exec_command"
+        ));
+        assert!(matches!(
+            &mapped.output[1],
+            ResponseOutputItem::ToolSearchCall { arguments, .. }
+                if arguments["query"] == "rg"
+        ));
+    }
+
+    fn chat_response(
+        content: Option<&str>,
+        tool_calls: Option<Vec<protocol::chat::ChatToolCall>>,
+        reasoning_content: Option<&str>,
+    ) -> protocol::chat::ChatCompletionResponse {
+        protocol::chat::ChatCompletionResponse {
+            id: "chatcmpl_test".into(),
+            object: "chat.completion".into(),
+            created: 1,
+            model: "test-model".into(),
+            choices: Some(vec![ChatCompletionChoice {
+                index: 0,
+                message: ChatCompletionMessage {
+                    role: "assistant".into(),
+                    content: content.map(|text| protocol::chat::ChatContent::Text(text.into())),
+                    tool_calls,
+                    reasoning_content: reasoning_content.map(str::to_string),
+                },
+                finish_reason: Some("stop".into()),
+            }]),
+            usage: None,
+            system_fingerprint: None,
+        }
+    }
+
+    fn chat_tool_call(id: &str, name: &str, arguments: &str) -> protocol::chat::ChatToolCall {
+        protocol::chat::ChatToolCall {
+            id: id.into(),
+            call_type: "function".into(),
+            function: protocol::chat::ChatFunctionCall {
+                name: Some(name.into()),
+                arguments: arguments.into(),
+            },
+        }
+    }
+
+    fn default_request(tools: Option<Vec<ResponseTool>>) -> ResponsesCreateRequest {
+        ResponsesCreateRequest {
+            model: "test-model".into(),
+            input: ResponseInput::Text("hi".into()),
+            instructions: None,
+            previous_response_id: None,
+            store: None,
+            stream: Some(false),
+            max_output_tokens: None,
+            temperature: None,
+            top_p: None,
+            tools,
+            tool_choice: None,
+            parallel_tool_calls: None,
+            reasoning: None,
+            text: None,
+            include: None,
+            metadata: None,
         }
     }
 }

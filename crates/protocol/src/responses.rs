@@ -267,6 +267,11 @@ pub enum ResponseTool {
         #[serde(skip_serializing_if = "Option::is_none")]
         server_description: Option<String>,
     },
+    #[serde(rename = "tool_search")]
+    ToolSearch {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
     #[serde(rename = "namespace")]
     Namespace {
         name: String,
@@ -404,7 +409,17 @@ pub enum ResponseOutputItem {
         status: String,
         call_id: String,
         name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
         arguments: String,
+    },
+    #[serde(rename = "tool_search_call")]
+    ToolSearchCall {
+        id: String,
+        status: String,
+        call_id: String,
+        execution: String,
+        arguments: serde_json::Value,
     },
     #[serde(rename = "reasoning")]
     Reasoning {

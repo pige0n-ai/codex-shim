@@ -539,6 +539,7 @@ pub fn validate_against_caps(
             ResponseTool::Mcp { .. } => {
                 return Err(crate::error::ApiError::hosted_tool_not_supported("mcp"));
             }
+            ResponseTool::ToolSearch { .. } => {}
             _ => {}
         }
     }
@@ -832,7 +833,9 @@ pub fn flatten_response_tools(tools: &[ResponseTool]) -> Vec<ResponseTool> {
     for tool in tools {
         match tool {
             ResponseTool::Namespace {
-                tools: inner_tools, ..
+                name: namespace,
+                tools: inner_tools,
+                ..
             } => {
                 for inner in inner_tools {
                     match inner {
@@ -843,7 +846,7 @@ pub fn flatten_response_tools(tools: &[ResponseTool]) -> Vec<ResponseTool> {
                             strict,
                         } => {
                             flattened.push(ResponseTool::Function {
-                                name: name.clone(),
+                                name: format!("{namespace}___{name}"),
                                 description: description.clone(),
                                 parameters: parameters.clone(),
                                 strict: *strict,
@@ -895,6 +898,23 @@ fn parse_tools(
             }
             ResponseTool::Mcp { .. } => {
                 warnings.push("hosted tool 'mcp' was requested but is not supported".into());
+            }
+            ResponseTool::ToolSearch { description } => {
+                parsed.push(CanonicalTool {
+                    name: "tool_search".into(),
+                    description: description.clone().or_else(|| {
+                        Some("Search and load Codex tools for the current task.".into())
+                    }),
+                    parameters: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "query": { "type": "string" },
+                            "limit": { "type": "integer" }
+                        },
+                        "required": ["query"]
+                    })),
+                    strict: Some(false),
+                });
             }
             ResponseTool::Custom {
                 name,

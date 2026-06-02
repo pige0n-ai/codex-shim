@@ -243,6 +243,7 @@ async fn handle_non_stream(
         &chat_response,
         &mapped.response_id,
         mapped.output_item_ids.first().unwrap_or(&String::new()),
+        &mapped.tool_context,
         &req,
         &mapping_config,
     )
@@ -441,6 +442,7 @@ async fn handle_stream(
     let sent_messages = chat_req.messages.clone();
     let previous_response_id = _req.previous_response_id.clone();
     let mapped_request_json_for_store = mapped_request_json.clone();
+    let tool_context = mapped.tool_context.clone();
     let heartbeat_interval = match state.config.upstream.downstream_heartbeat_seconds {
         0 => None,
         seconds => Some(Duration::from_secs(seconds)),
@@ -456,7 +458,7 @@ async fn handle_stream(
             model.clone(),
             created_at,
             output_item_id.clone(),
-            mapper::custom_tools::custom_tool_names(_req.tools.as_deref().unwrap_or(&[])),
+            tool_context,
         );
 
         futures::pin_mut!(sse_stream);
@@ -857,14 +859,42 @@ async fn handle_stream(
 
         // Build canonical messages from sent messages + synthesized assistant response
         let output_text = stream_state.accumulated_text.clone();
+        let tool_calls = if stream_state.tool_call_active {
+            match stream_state.chat_tool_calls() {
+                Ok(tool_calls) => Some(tool_calls),
+                Err(error) => {
+                    emit_stream_failure(
+                        &tx,
+                        &mut response_sse_events,
+                        &mut relay_diagnostics,
+                        response_id.clone(),
+                        model.clone(),
+                        created_at,
+                        error,
+                    )
+                    .await;
+                    persist_stream_failure(
+                        &store,
+                        response_id,
+                        model,
+                        created_at,
+                        req_json,
+                        mapped_request_json_for_store,
+                        previous_response_id,
+                        sent_messages,
+                        upstream_sse_events,
+                        response_sse_events,
+                        &relay_diagnostics,
+                    );
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let mut canonical = sent_messages;
-        let has_content = !output_text.is_empty() || stream_state.tool_call_active;
+        let has_content = !output_text.is_empty() || tool_calls.is_some();
         if has_content {
-            let tool_calls = if stream_state.tool_call_active {
-                Some(stream_state.chat_tool_calls())
-            } else {
-                None
-            };
             let text_content = if output_text.is_empty() {
                 None
             } else {
@@ -1223,6 +1253,18 @@ fn response_sse_event_type(event: &ResponseSseEvent) -> &'static str {
         ResponseSseEvent::ResponseCreated { .. } => "response.created",
         ResponseSseEvent::ResponseInProgress { .. } => "response.in_progress",
         ResponseSseEvent::ResponseOutputItemAdded { .. } => "response.output_item.added",
+        ResponseSseEvent::ResponseReasoningSummaryPartAdded { .. } => {
+            "response.reasoning_summary_part.added"
+        }
+        ResponseSseEvent::ResponseReasoningSummaryTextDelta { .. } => {
+            "response.reasoning_summary_text.delta"
+        }
+        ResponseSseEvent::ResponseReasoningSummaryTextDone { .. } => {
+            "response.reasoning_summary_text.done"
+        }
+        ResponseSseEvent::ResponseReasoningSummaryPartDone { .. } => {
+            "response.reasoning_summary_part.done"
+        }
         ResponseSseEvent::ResponseContentPartAdded { .. } => "response.content_part.added",
         ResponseSseEvent::ResponseOutputTextDelta { .. } => "response.output_text.delta",
         ResponseSseEvent::ResponseOutputTextDone { .. } => "response.output_text.done",

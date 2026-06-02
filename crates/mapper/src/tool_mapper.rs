@@ -3,19 +3,20 @@ use protocol::responses::{ResponseInput, ResponseTool, ToolChoice};
 
 use crate::MappingConfig;
 use crate::apply_patch_tool;
+use crate::chat_tool_context::flatten_namespace_tool_name;
 use crate::custom_tools::{custom_tool_description, custom_tool_schema};
 
 /// Map Responses tool definitions → Chat Completions tools.
 pub fn map_response_tools(tools: &[ResponseTool], config: &MappingConfig) -> Vec<ChatTool> {
-    tools
-        .iter()
-        .filter_map(|t| match t {
+    let mut mapped = Vec::new();
+    for t in tools {
+        match t {
             ResponseTool::Function {
                 name,
                 description,
                 parameters,
                 strict,
-            } => Some(ChatTool {
+            } => mapped.push(ChatTool {
                 tool_type: "function".into(),
                 function: ChatFunctionDef {
                     name: name.clone(),
@@ -25,10 +26,28 @@ pub fn map_response_tools(tools: &[ResponseTool], config: &MappingConfig) -> Vec
                 },
             }),
             // Custom Codex tools are function tools to the upstream model
-            ResponseTool::CodeInterpreter { .. } => None,
-            ResponseTool::ComputerUse { .. } => None,
-            ResponseTool::FileSearch { .. } => None,
-            ResponseTool::WebSearchPreview { .. } => None,
+            ResponseTool::CodeInterpreter { .. } => {}
+            ResponseTool::ComputerUse { .. } => {}
+            ResponseTool::FileSearch { .. } => {}
+            ResponseTool::WebSearchPreview { .. } => {}
+            ResponseTool::ToolSearch { description } => mapped.push(ChatTool {
+                tool_type: "function".into(),
+                function: ChatFunctionDef {
+                    name: "tool_search".into(),
+                    description: description.clone().or_else(|| {
+                        Some("Search and load Codex tools for the current task.".into())
+                    }),
+                    parameters: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "query": { "type": "string" },
+                            "limit": { "type": "integer" }
+                        },
+                        "required": ["query"]
+                    })),
+                    strict: Some(false),
+                },
+            }),
             ResponseTool::Custom {
                 name,
                 description,
@@ -38,7 +57,7 @@ pub fn map_response_tools(tools: &[ResponseTool], config: &MappingConfig) -> Vec
                     && config.apply_patch_upstream_tool_type
                         == apply_patch_tool::APPLY_PATCH_UPSTREAM_STRUCTURED
                 {
-                    Some(ChatTool {
+                    mapped.push(ChatTool {
                         tool_type: "function".into(),
                         function: ChatFunctionDef {
                             name: name.clone(),
@@ -50,7 +69,7 @@ pub fn map_response_tools(tools: &[ResponseTool], config: &MappingConfig) -> Vec
                         },
                     })
                 } else {
-                    Some(ChatTool {
+                    mapped.push(ChatTool {
                         tool_type: "function".into(),
                         function: ChatFunctionDef {
                             name: name.clone(),
@@ -61,11 +80,30 @@ pub fn map_response_tools(tools: &[ResponseTool], config: &MappingConfig) -> Vec
                     })
                 }
             }
-            ResponseTool::Mcp { .. }
-            | ResponseTool::UnknownTool
-            | ResponseTool::Namespace { .. } => None,
-        })
-        .collect()
+            ResponseTool::Namespace { name, tools, .. } => {
+                for tool in tools {
+                    match tool {
+                        protocol::responses::NamespaceTool::Function {
+                            name: child_name,
+                            description,
+                            parameters,
+                            strict,
+                        } => mapped.push(ChatTool {
+                            tool_type: "function".into(),
+                            function: ChatFunctionDef {
+                                name: flatten_namespace_tool_name(name, child_name),
+                                description: description.clone(),
+                                parameters: parameters.clone(),
+                                strict: *strict,
+                            },
+                        }),
+                    }
+                }
+            }
+            ResponseTool::Mcp { .. } | ResponseTool::UnknownTool => {}
+        }
+    }
+    mapped
 }
 
 pub fn apply_chat_tool_mapping_overrides(

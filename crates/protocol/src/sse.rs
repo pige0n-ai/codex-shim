@@ -20,6 +20,38 @@ pub enum ResponseSseEvent {
         item: ResponseOutputItem,
     },
 
+    #[serde(rename = "response.reasoning_summary_part.added")]
+    ResponseReasoningSummaryPartAdded {
+        item_id: String,
+        output_index: u32,
+        summary_index: u32,
+        part: crate::responses::SummaryPart,
+    },
+
+    #[serde(rename = "response.reasoning_summary_text.delta")]
+    ResponseReasoningSummaryTextDelta {
+        item_id: String,
+        output_index: u32,
+        summary_index: u32,
+        delta: String,
+    },
+
+    #[serde(rename = "response.reasoning_summary_text.done")]
+    ResponseReasoningSummaryTextDone {
+        item_id: String,
+        output_index: u32,
+        summary_index: u32,
+        text: String,
+    },
+
+    #[serde(rename = "response.reasoning_summary_part.done")]
+    ResponseReasoningSummaryPartDone {
+        item_id: String,
+        output_index: u32,
+        summary_index: u32,
+        part: crate::responses::SummaryPart,
+    },
+
     #[serde(rename = "response.content_part.added")]
     ResponseContentPartAdded {
         item_id: String,

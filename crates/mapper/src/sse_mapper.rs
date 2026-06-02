@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use protocol::chat::{ChatCompletionChunk, ChatFunctionCall, ChatToolCall};
 use protocol::common::ContentPart;
 use protocol::error::ApiError;
@@ -7,80 +5,104 @@ use protocol::responses::{ResponseOutputItem, SummaryPart};
 use protocol::sse::{ResponseSseEvent, SseResponseShell};
 use uuid::Uuid;
 
+use crate::chat_tool_context::ChatToolContext;
 use crate::custom_tools::custom_tool_input_from_arguments;
 use crate::tool_call_normalizer::split_concatenated_json_objects;
 
-/// Mutable state for tracking SSE event emission across a stream.
+#[derive(Debug, Default)]
+struct ReasoningItemState {
+    output_index: Option<u32>,
+    item_id: String,
+    text: String,
+    added: bool,
+    done: bool,
+}
+
+#[derive(Debug, Default)]
+struct TextItemState {
+    output_index: Option<u32>,
+    item_id: String,
+    text: String,
+    added: bool,
+    done: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ToolCallState {
+    chat_index: u32,
+    output_index: Option<u32>,
+    item_id: String,
+    call_id: Option<String>,
+    name: Option<String>,
+    arguments: String,
+    added: bool,
+    done: bool,
+}
+
+impl ToolCallState {
+    fn new(chat_index: u32) -> Self {
+        Self {
+            chat_index,
+            output_index: None,
+            item_id: format!("fc_{}", Uuid::new_v4()),
+            call_id: None,
+            name: None,
+            arguments: String::new(),
+            added: false,
+            done: false,
+        }
+    }
+
+    fn require_call_id(&self) -> Result<String, ApiError> {
+        self.call_id
+            .as_ref()
+            .filter(|value| !value.is_empty())
+            .cloned()
+            .ok_or_else(|| {
+                ApiError::upstream_error(format!(
+                    "streamed tool call at index {} missing required call_id",
+                    self.chat_index
+                ))
+            })
+    }
+
+    fn require_name(&self) -> Result<String, ApiError> {
+        self.name
+            .as_ref()
+            .filter(|value| !value.is_empty())
+            .cloned()
+            .ok_or_else(|| {
+                ApiError::upstream_error(format!(
+                    "streamed tool call at index {} missing required function.name",
+                    self.chat_index
+                ))
+            })
+    }
+}
+
+/// Mutable state for tracking SSE event emission across a Chat Completions stream.
 #[derive(Debug)]
 pub struct StreamState {
     pub response_id: String,
     pub model: String,
     pub created_at: i64,
-    pub output_item_id: String,
-    pub output_index: u32,
-    content_index: u32,
     lifecycle_sent: bool,
-    text_item_started: bool,
-    completed_sent: bool, // guard against duplicate completion events
+    completed_sent: bool,
+    next_output_index: u32,
+    reasoning: ReasoningItemState,
+    text: TextItemState,
+    tools: Vec<ToolCallState>,
+    completed_items: Vec<(u32, ResponseOutputItem)>,
     pub accumulated_text: String,
     pub tool_call_id: Option<String>,
     pub tool_call_name: Option<String>,
     pub tool_call_arguments: String,
     pub tool_call_index: u32,
     pub tool_call_active: bool,
-    tool_calls: Vec<StreamToolCall>,
     pub reasoning_content: String,
     final_usage: Option<protocol::common::Usage>,
     pub finish_reason: Option<String>,
-    custom_tool_names: BTreeSet<String>,
-}
-
-#[derive(Debug, Clone)]
-struct StreamToolCall {
-    index: u32,
-    item_id: String,
-    call_id: Option<String>,
-    name: Option<String>,
-    arguments: String,
-}
-
-impl StreamToolCall {
-    fn is_custom(&self, custom_tool_names: &BTreeSet<String>) -> bool {
-        self.name
-            .as_deref()
-            .is_some_and(|name| custom_tool_names.contains(name))
-    }
-
-    fn output_item(
-        &self,
-        status: &str,
-        custom_tool_names: &BTreeSet<String>,
-    ) -> Result<ResponseOutputItem, ApiError> {
-        let call_id = self.call_id.clone().unwrap_or_default();
-        let name = self.name.clone().unwrap_or_default();
-        if self.is_custom(custom_tool_names) {
-            let input = if status == "completed" {
-                custom_tool_input_from_arguments(&name, &self.arguments)?
-            } else {
-                String::new()
-            };
-            Ok(ResponseOutputItem::CustomToolCall {
-                id: self.item_id.clone(),
-                status: status.into(),
-                call_id,
-                name,
-                input,
-            })
-        } else {
-            Ok(ResponseOutputItem::FunctionCall {
-                id: self.item_id.clone(),
-                status: status.into(),
-                call_id,
-                name,
-                arguments: self.arguments.clone(),
-            })
-        }
-    }
+    tool_context: ChatToolContext,
 }
 
 impl StreamState {
@@ -89,124 +111,62 @@ impl StreamState {
         model: String,
         created_at: i64,
         output_item_id: String,
-        custom_tool_names: BTreeSet<String>,
+        tool_context: ChatToolContext,
     ) -> Self {
         Self {
             response_id,
             model,
             created_at,
-            output_item_id,
-            output_index: 0,
-            content_index: 0,
             lifecycle_sent: false,
-            text_item_started: false,
             completed_sent: false,
+            next_output_index: 0,
+            reasoning: ReasoningItemState::default(),
+            text: TextItemState {
+                item_id: output_item_id,
+                ..TextItemState::default()
+            },
+            tools: Vec::new(),
+            completed_items: Vec::new(),
             accumulated_text: String::new(),
             tool_call_id: None,
             tool_call_name: None,
             tool_call_arguments: String::new(),
             tool_call_index: 0,
             tool_call_active: false,
-            tool_calls: Vec::new(),
             reasoning_content: String::new(),
             final_usage: None,
             finish_reason: None,
-            custom_tool_names,
+            tool_context,
         }
     }
 
-    pub fn chat_tool_calls(&self) -> Vec<ChatToolCall> {
+    pub fn chat_tool_calls(&self) -> Result<Vec<ChatToolCall>, ApiError> {
         self.normalized_tool_calls()
-            .iter()
-            .map(|tc| ChatToolCall {
-                id: tc.call_id.clone().unwrap_or_default(),
-                call_type: "function".into(),
-                function: ChatFunctionCall {
-                    name: tc.name.clone(),
-                    arguments: tc.arguments.clone(),
-                },
+            .into_iter()
+            .map(|tc| {
+                Ok(ChatToolCall {
+                    id: tc.require_call_id()?,
+                    call_type: "function".into(),
+                    function: ChatFunctionCall {
+                        name: Some(tc.require_name()?),
+                        arguments: tc.arguments,
+                    },
+                })
             })
             .collect()
     }
 
-    fn normalized_tool_calls(&self) -> Vec<StreamToolCall> {
-        let mut normalized = Vec::new();
-        for tool_call in &self.tool_calls {
-            if let Some(arguments) = split_concatenated_json_objects(&tool_call.arguments) {
-                for (idx, arguments) in arguments.into_iter().enumerate() {
-                    normalized.push(StreamToolCall {
-                        index: normalized.len() as u32,
-                        item_id: if idx == 0 {
-                            tool_call.item_id.clone()
-                        } else {
-                            format!("fc_{}", Uuid::new_v4())
-                        },
-                        call_id: tool_call.call_id.as_ref().map(|call_id| {
-                            if idx == 0 {
-                                call_id.clone()
-                            } else {
-                                format!("{call_id}_{idx}")
-                            }
-                        }),
-                        name: tool_call.name.clone(),
-                        arguments,
-                    });
-                }
-            } else {
-                let mut tool_call = tool_call.clone();
-                tool_call.index = normalized.len() as u32;
-                normalized.push(tool_call);
-            }
-        }
-        normalized
+    pub fn final_usage(&self) -> Option<&protocol::common::Usage> {
+        self.final_usage.as_ref()
     }
 
-    fn ensure_text_item_started(&mut self, events: &mut Vec<ResponseSseEvent>) {
-        if self.text_item_started {
-            return;
-        }
-        events.push(ResponseSseEvent::ResponseOutputItemAdded {
-            output_index: self.output_index,
-            item: ResponseOutputItem::Message {
-                id: self.output_item_id.clone(),
-                status: "in_progress".into(),
-                role: "assistant".into(),
-                content: vec![],
-            },
-        });
-        events.push(ResponseSseEvent::ResponseContentPartAdded {
-            item_id: self.output_item_id.clone(),
-            output_index: self.output_index,
-            content_index: self.content_index,
-            part: ContentPart::OutputText {
-                text: String::new(),
-                annotations: vec![],
-            },
-        });
-        self.text_item_started = true;
-    }
-
-    /// Process a single Chat SSE chunk. Returns zero or more Response SSE events.
     pub fn process_chunk(
         &mut self,
         chunk: &ChatCompletionChunk,
     ) -> Result<Vec<ResponseSseEvent>, ApiError> {
-        let mut events: Vec<ResponseSseEvent> = Vec::new();
+        let mut events = Vec::new();
+        self.ensure_lifecycle_started(&mut events);
 
-        // Send lifecycle events on first chunk
-        if !self.lifecycle_sent {
-            events.push(ResponseSseEvent::ResponseCreated {
-                response: SseResponseShell::minimal(
-                    self.response_id.clone(),
-                    self.model.clone(),
-                    self.created_at,
-                ),
-            });
-            self.lifecycle_sent = true;
-        }
-
-        // Save usage before checking empty choices
-        // (OpenAI-compatible backends often send usage in a choices: [] final chunk)
         if let Some(usage) = &chunk.usage {
             self.final_usage = Some(usage.clone());
         }
@@ -217,288 +177,470 @@ impl StreamState {
         }
 
         let choice = &choices[0];
+        if let Some(finish_reason) = &choice.finish_reason {
+            self.finish_reason = Some(finish_reason.clone());
+        }
+
         let delta = &choice.delta;
-
-        // Save finish reason
-        if let Some(fr) = &choice.finish_reason {
-            self.finish_reason = Some(fr.clone());
-        }
-
-        // Accumulate reasoning content (needed for DeepSeek tool call continuation)
-        if let Some(rc) = &delta.reasoning_content
-            && !rc.is_empty()
+        if let Some(reasoning) = &delta.reasoning_content
+            && !reasoning.is_empty()
         {
-            self.reasoning_content.push_str(rc);
+            events.extend(self.push_reasoning_delta(reasoning));
         }
 
-        // Handle text content
         if let Some(text) = &delta.content
             && !text.is_empty()
         {
-            self.ensure_text_item_started(&mut events);
-            self.accumulated_text.push_str(text);
-            events.push(ResponseSseEvent::ResponseOutputTextDelta {
-                item_id: self.output_item_id.clone(),
-                output_index: self.output_index,
-                content_index: self.content_index,
-                delta: text.clone(),
-            });
+            events.extend(self.finalize_reasoning()?);
+            events.extend(self.push_text_delta(text));
         }
 
-        // Handle tool calls
         if let Some(tool_calls) = &delta.tool_calls {
-            for tc in tool_calls {
-                let existing_pos = self
-                    .tool_calls
-                    .iter()
-                    .position(|call| call.index == tc.index);
-                let (pos, emit_added) = match existing_pos {
-                    Some(pos) => (pos, false),
-                    None => {
-                        let is_first = self.tool_calls.is_empty();
-                        let item_id = if is_first && !self.text_item_started {
-                            self.output_item_id.clone()
-                        } else {
-                            format!("fc_{}", Uuid::new_v4())
-                        };
-                        self.tool_call_active = true;
-                        self.tool_calls.push(StreamToolCall {
-                            index: tc.index,
-                            item_id,
-                            call_id: tc.id.clone(),
-                            name: None,
-                            arguments: String::new(),
-                        });
-                        let pos = self.tool_calls.len() - 1;
-                        (pos, true)
-                    }
-                };
-
-                if let Some(id) = &tc.id {
-                    self.tool_calls[pos].call_id = Some(id.clone());
-                }
-
-                if let Some(func) = &tc.function
-                    && let Some(name) = &func.name
-                {
-                    self.tool_calls[pos].name = Some(name.clone());
-                }
-                if emit_added {
-                    events.push(ResponseSseEvent::ResponseOutputItemAdded {
-                        output_index: tc.index,
-                        item: self.tool_calls[pos]
-                            .output_item("in_progress", &self.custom_tool_names)?,
-                    });
-                }
-                if let Some(func) = &tc.function
-                    && let Some(args) = &func.arguments
-                {
-                    self.tool_calls[pos].arguments.push_str(args);
-                    if !self.tool_calls[pos].is_custom(&self.custom_tool_names) {
-                        events.push(ResponseSseEvent::ResponseFunctionCallArgumentsDelta {
-                            item_id: self.tool_calls[pos].item_id.clone(),
-                            output_index: tc.index,
-                            delta: args.clone(),
-                        });
-                    }
-                }
-
-                if pos == 0 {
-                    self.tool_call_index = self.tool_calls[0].index;
-                    self.tool_call_id = self.tool_calls[0].call_id.clone();
-                    self.tool_call_name = self.tool_calls[0].name.clone();
-                    self.tool_call_arguments = self.tool_calls[0].arguments.clone();
-                }
+            events.extend(self.finalize_reasoning()?);
+            for tool_call in tool_calls {
+                events.extend(self.push_tool_call_delta(tool_call)?);
             }
         }
 
         Ok(events)
     }
 
-    pub fn final_usage(&self) -> Option<&protocol::common::Usage> {
-        self.final_usage.as_ref()
-    }
-
-    /// Emit the final completion lifecycle events once the upstream stream ends.
     pub fn complete(&mut self) -> Result<Vec<ResponseSseEvent>, ApiError> {
         if self.completed_sent {
             return Ok(Vec::new());
         }
         self.completed_sent = true;
+
         let mut events = Vec::new();
-        self.emit_completion_events(&mut events)?;
-        Ok(events)
-    }
-
-    fn emit_completion_events(
-        &mut self,
-        events: &mut Vec<ResponseSseEvent>,
-    ) -> Result<(), ApiError> {
-        let tool_calls = self.normalized_tool_calls();
-
-        if self.tool_call_active {
-            for tool_call in tool_calls.iter().skip(1).filter(|tool_call| {
-                !self
-                    .tool_calls
-                    .iter()
-                    .any(|original| original.item_id == tool_call.item_id)
-            }) {
-                events.push(ResponseSseEvent::ResponseOutputItemAdded {
-                    output_index: tool_call.index,
-                    item: tool_call.output_item("in_progress", &self.custom_tool_names)?,
-                });
-            }
-
-            // Finish the tool call
-            for tool_call in &tool_calls {
-                if tool_call.is_custom(&self.custom_tool_names) {
-                    let name = tool_call.name.clone().unwrap_or_default();
-                    events.push(ResponseSseEvent::ResponseCustomToolCallInputDelta {
-                        item_id: tool_call.item_id.clone(),
-                        output_index: tool_call.index,
-                        delta: custom_tool_input_from_arguments(&name, &tool_call.arguments)?,
-                    });
-                } else {
-                    events.push(ResponseSseEvent::ResponseFunctionCallArgumentsDone {
-                        item_id: tool_call.item_id.clone(),
-                        output_index: tool_call.index,
-                        arguments: tool_call.arguments.clone(),
-                        name: tool_call.name.clone().unwrap_or_default(),
-                    });
-                }
-            }
+        self.ensure_lifecycle_started(&mut events);
+        events.extend(self.finalize_reasoning()?);
+        if self.text.added || !self.tool_call_active {
+            events.extend(self.finalize_text()?);
         }
+        events.extend(self.finalize_tools()?);
 
-        if !self.accumulated_text.is_empty() || !self.tool_call_active {
-            self.ensure_text_item_started(events);
-            // Finish text output
-            events.push(ResponseSseEvent::ResponseOutputTextDone {
-                item_id: self.output_item_id.clone(),
-                output_index: self.output_index,
-                content_index: self.content_index,
-                text: self.accumulated_text.clone(),
-            });
+        let mut output = self.completed_items.clone();
+        output.sort_by_key(|(output_index, _)| *output_index);
+        let output = output.into_iter().map(|(_, item)| item).collect::<Vec<_>>();
 
-            // Content part done
-            events.push(ResponseSseEvent::ResponseContentPartDone {
-                item_id: self.output_item_id.clone(),
-                output_index: self.output_index,
-                content_index: self.content_index,
-                part: ContentPart::OutputText {
-                    text: self.accumulated_text.clone(),
-                    annotations: vec![],
-                },
-            });
-        }
-
-        // Output item done
-        let item = if self.tool_call_active {
-            tool_calls
-                .first()
-                .map(|tool_call| tool_call.output_item("completed", &self.custom_tool_names))
-                .transpose()?
-                .unwrap_or_else(|| ResponseOutputItem::FunctionCall {
-                    id: self.output_item_id.clone(),
-                    status: "completed".into(),
-                    call_id: String::new(),
-                    name: String::new(),
-                    arguments: String::new(),
-                })
-        } else {
-            ResponseOutputItem::Message {
-                id: self.output_item_id.clone(),
-                status: "completed".into(),
-                role: "assistant".into(),
-                content: vec![ContentPart::OutputText {
-                    text: self.accumulated_text.clone(),
-                    annotations: vec![],
-                }],
-            }
-        };
-        events.push(ResponseSseEvent::ResponseOutputItemDone {
-            output_index: if self.tool_call_active {
-                tool_calls
-                    .first()
-                    .map(|tool_call| tool_call.index)
-                    .unwrap_or(self.output_index)
-            } else {
-                self.output_index
-            },
-            item,
-        });
-        if self.tool_call_active {
-            for tool_call in tool_calls.iter().skip(1) {
-                events.push(ResponseSseEvent::ResponseOutputItemDone {
-                    output_index: tool_call.index,
-                    item: tool_call.output_item("completed", &self.custom_tool_names)?,
-                });
-            }
-        }
-
-        // Response completed
         let mut shell = SseResponseShell::minimal(
             self.response_id.clone(),
             self.model.clone(),
             self.created_at,
         );
-        let mut final_output: Vec<ResponseOutputItem> = Vec::new();
-
-        // Include reasoning item if present.
-        // Codex requires `summary` to be present (Vec<ReasoningItemReasoningSummary>),
-        // and uses `reasoning_text`/`text` for content items. `output_text` is not
-        // a recognized ReasoningItemContent variant, so we put reasoning text in
-        // `summary` (as SummaryText) which Codex always parses.
-        if !self.reasoning_content.is_empty() {
-            final_output.push(ResponseOutputItem::Reasoning {
-                id: format!("rs_{}", Uuid::new_v4()),
-                content: None,
-                summary: Some(vec![SummaryPart::SummaryText {
-                    text: self.reasoning_content.clone(),
-                }]),
-                status: Some("completed".into()),
-            });
-        }
-
-        if self.tool_call_active {
-            for tool_call in &tool_calls {
-                final_output.push(tool_call.output_item("completed", &self.custom_tool_names)?);
-            }
-        } else {
-            final_output.push(ResponseOutputItem::Message {
-                id: self.output_item_id.clone(),
-                status: "completed".into(),
-                role: "assistant".into(),
-                content: vec![ContentPart::OutputText {
-                    text: self.accumulated_text.clone(),
-                    annotations: vec![],
-                }],
-            });
-        }
-
         shell.status = "completed".into();
-        shell.output = Some(final_output);
+        shell.output = Some(output);
         shell.output_text = Some(self.accumulated_text.clone());
         shell.usage = Some(self.final_usage.clone().unwrap_or_default());
-
         events.push(ResponseSseEvent::ResponseCompleted { response: shell });
-        Ok(())
+        Ok(events)
+    }
+
+    fn ensure_lifecycle_started(&mut self, events: &mut Vec<ResponseSseEvent>) {
+        if self.lifecycle_sent {
+            return;
+        }
+        let response = SseResponseShell::minimal(
+            self.response_id.clone(),
+            self.model.clone(),
+            self.created_at,
+        );
+        events.push(ResponseSseEvent::ResponseCreated {
+            response: response.clone(),
+        });
+        events.push(ResponseSseEvent::ResponseInProgress { response });
+        self.lifecycle_sent = true;
+    }
+
+    fn next_output_index(&mut self) -> u32 {
+        let output_index = self.next_output_index;
+        self.next_output_index += 1;
+        output_index
+    }
+
+    fn push_reasoning_delta(&mut self, delta: &str) -> Vec<ResponseSseEvent> {
+        let mut events = Vec::new();
+        if !self.reasoning.added {
+            let output_index = self.next_output_index();
+            let item_id = format!("rs_{}", Uuid::new_v4());
+            self.reasoning.output_index = Some(output_index);
+            self.reasoning.item_id = item_id.clone();
+            self.reasoning.added = true;
+            events.push(ResponseSseEvent::ResponseOutputItemAdded {
+                output_index,
+                item: ResponseOutputItem::Reasoning {
+                    id: item_id.clone(),
+                    content: None,
+                    summary: Some(vec![]),
+                    status: Some("in_progress".into()),
+                },
+            });
+            events.push(ResponseSseEvent::ResponseReasoningSummaryPartAdded {
+                item_id,
+                output_index,
+                summary_index: 0,
+                part: SummaryPart::SummaryText {
+                    text: String::new(),
+                },
+            });
+        }
+
+        self.reasoning.text.push_str(delta);
+        self.reasoning_content.push_str(delta);
+        events.push(ResponseSseEvent::ResponseReasoningSummaryTextDelta {
+            item_id: self.reasoning.item_id.clone(),
+            output_index: self.reasoning.output_index.unwrap_or(0),
+            summary_index: 0,
+            delta: delta.to_string(),
+        });
+        events
+    }
+
+    fn finalize_reasoning(&mut self) -> Result<Vec<ResponseSseEvent>, ApiError> {
+        if !self.reasoning.added || self.reasoning.done {
+            return Ok(Vec::new());
+        }
+        let output_index = self.reasoning.output_index.unwrap_or(0);
+        let item_id = self.reasoning.item_id.clone();
+        let text = self.reasoning.text.clone();
+        let summary = SummaryPart::SummaryText { text: text.clone() };
+        let item = ResponseOutputItem::Reasoning {
+            id: item_id.clone(),
+            content: None,
+            summary: Some(vec![summary.clone()]),
+            status: Some("completed".into()),
+        };
+        self.completed_items.push((output_index, item.clone()));
+        self.reasoning.done = true;
+        Ok(vec![
+            ResponseSseEvent::ResponseReasoningSummaryTextDone {
+                item_id: item_id.clone(),
+                output_index,
+                summary_index: 0,
+                text: text.clone(),
+            },
+            ResponseSseEvent::ResponseReasoningSummaryPartDone {
+                item_id: item_id.clone(),
+                output_index,
+                summary_index: 0,
+                part: summary,
+            },
+            ResponseSseEvent::ResponseOutputItemDone { output_index, item },
+        ])
+    }
+
+    fn push_text_delta(&mut self, delta: &str) -> Vec<ResponseSseEvent> {
+        let mut events = Vec::new();
+        if !self.text.added {
+            let output_index = self.next_output_index();
+            self.text.output_index = Some(output_index);
+            self.text.added = true;
+            events.push(ResponseSseEvent::ResponseOutputItemAdded {
+                output_index,
+                item: ResponseOutputItem::Message {
+                    id: self.text.item_id.clone(),
+                    status: "in_progress".into(),
+                    role: "assistant".into(),
+                    content: vec![],
+                },
+            });
+            events.push(ResponseSseEvent::ResponseContentPartAdded {
+                item_id: self.text.item_id.clone(),
+                output_index,
+                content_index: 0,
+                part: ContentPart::OutputText {
+                    text: String::new(),
+                    annotations: vec![],
+                },
+            });
+        }
+
+        self.text.text.push_str(delta);
+        self.accumulated_text.push_str(delta);
+        events.push(ResponseSseEvent::ResponseOutputTextDelta {
+            item_id: self.text.item_id.clone(),
+            output_index: self.text.output_index.unwrap_or(0),
+            content_index: 0,
+            delta: delta.to_string(),
+        });
+        events
+    }
+
+    fn finalize_text(&mut self) -> Result<Vec<ResponseSseEvent>, ApiError> {
+        if self.text.done {
+            return Ok(Vec::new());
+        }
+        let mut events = Vec::new();
+        if !self.text.added {
+            let output_index = self.next_output_index();
+            self.text.output_index = Some(output_index);
+            self.text.added = true;
+            events.push(ResponseSseEvent::ResponseOutputItemAdded {
+                output_index,
+                item: ResponseOutputItem::Message {
+                    id: self.text.item_id.clone(),
+                    status: "in_progress".into(),
+                    role: "assistant".into(),
+                    content: vec![],
+                },
+            });
+            events.push(ResponseSseEvent::ResponseContentPartAdded {
+                item_id: self.text.item_id.clone(),
+                output_index,
+                content_index: 0,
+                part: ContentPart::OutputText {
+                    text: String::new(),
+                    annotations: vec![],
+                },
+            });
+        }
+        let output_index = self.text.output_index.unwrap_or_else(|| {
+            let output_index = self.next_output_index;
+            self.next_output_index += 1;
+            self.text.output_index = Some(output_index);
+            output_index
+        });
+        let item = ResponseOutputItem::Message {
+            id: self.text.item_id.clone(),
+            status: "completed".into(),
+            role: "assistant".into(),
+            content: vec![ContentPart::OutputText {
+                text: self.text.text.clone(),
+                annotations: vec![],
+            }],
+        };
+        self.completed_items.push((output_index, item.clone()));
+        self.text.done = true;
+        events.extend([
+            ResponseSseEvent::ResponseOutputTextDone {
+                item_id: self.text.item_id.clone(),
+                output_index,
+                content_index: 0,
+                text: self.text.text.clone(),
+            },
+            ResponseSseEvent::ResponseContentPartDone {
+                item_id: self.text.item_id.clone(),
+                output_index,
+                content_index: 0,
+                part: ContentPart::OutputText {
+                    text: self.text.text.clone(),
+                    annotations: vec![],
+                },
+            },
+            ResponseSseEvent::ResponseOutputItemDone { output_index, item },
+        ]);
+        Ok(events)
+    }
+
+    fn push_tool_call_delta(
+        &mut self,
+        tool_call: &protocol::chat::ChatToolCallDelta,
+    ) -> Result<Vec<ResponseSseEvent>, ApiError> {
+        let mut events = Vec::new();
+        let pos = match self
+            .tools
+            .iter()
+            .position(|existing| existing.chat_index == tool_call.index)
+        {
+            Some(pos) => pos,
+            None => {
+                self.tool_call_active = true;
+                self.tools.push(ToolCallState::new(tool_call.index));
+                self.tools.len() - 1
+            }
+        };
+
+        if let Some(id) = &tool_call.id {
+            let chat_index = self.tools[pos].chat_index;
+            set_once(&mut self.tools[pos].call_id, id, "call_id", chat_index)?;
+        }
+        if let Some(function) = &tool_call.function {
+            if let Some(name) = &function.name {
+                let chat_index = self.tools[pos].chat_index;
+                set_once(&mut self.tools[pos].name, name, "function.name", chat_index)?;
+            }
+            if let Some(arguments) = &function.arguments {
+                self.tools[pos].arguments.push_str(arguments);
+            }
+        }
+
+        if !self.tools[pos].added
+            && self.tools[pos]
+                .call_id
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+            && self.tools[pos]
+                .name
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+        {
+            let output_index = self.next_output_index();
+            self.tools[pos].output_index = Some(output_index);
+            self.tools[pos].added = true;
+            let item = self.tool_item(&self.tools[pos], "in_progress")?;
+            events.push(ResponseSseEvent::ResponseOutputItemAdded { output_index, item });
+            if !self.is_custom_tool(&self.tools[pos]) && !self.tools[pos].arguments.is_empty() {
+                events.push(ResponseSseEvent::ResponseFunctionCallArgumentsDelta {
+                    item_id: self.tools[pos].item_id.clone(),
+                    output_index,
+                    delta: self.tools[pos].arguments.clone(),
+                });
+            }
+        } else if self.tools[pos].added
+            && !self.is_custom_tool(&self.tools[pos])
+            && let Some(arguments) = tool_call
+                .function
+                .as_ref()
+                .and_then(|function| function.arguments.as_ref())
+            && !arguments.is_empty()
+        {
+            events.push(ResponseSseEvent::ResponseFunctionCallArgumentsDelta {
+                item_id: self.tools[pos].item_id.clone(),
+                output_index: self.tools[pos].output_index.unwrap_or(0),
+                delta: arguments.clone(),
+            });
+        }
+
+        if let Some(first) = self.tools.first() {
+            self.tool_call_index = first.chat_index;
+            self.tool_call_id = first.call_id.clone();
+            self.tool_call_name = first.name.clone();
+            self.tool_call_arguments = first.arguments.clone();
+        }
+
+        Ok(events)
+    }
+
+    fn finalize_tools(&mut self) -> Result<Vec<ResponseSseEvent>, ApiError> {
+        let normalized = self.normalized_tool_calls();
+        let mut events = Vec::new();
+        for mut tool in normalized {
+            if tool.done {
+                continue;
+            }
+            let output_index = match tool.output_index {
+                Some(output_index) => output_index,
+                None => {
+                    let output_index = self.next_output_index();
+                    tool.output_index = Some(output_index);
+                    output_index
+                }
+            };
+            if !tool.added {
+                let item = self.tool_item(&tool, "in_progress")?;
+                events.push(ResponseSseEvent::ResponseOutputItemAdded { output_index, item });
+            }
+
+            let name = tool.require_name()?;
+            if self.is_custom_tool(&tool) {
+                let input = custom_tool_input_from_arguments(&name, &tool.arguments)?;
+                if !input.is_empty() {
+                    events.push(ResponseSseEvent::ResponseCustomToolCallInputDelta {
+                        item_id: tool.item_id.clone(),
+                        output_index,
+                        delta: input,
+                    });
+                }
+            } else {
+                events.push(ResponseSseEvent::ResponseFunctionCallArgumentsDone {
+                    item_id: tool.item_id.clone(),
+                    output_index,
+                    arguments: tool.arguments.clone(),
+                    name,
+                });
+            }
+
+            let item = self.tool_item(&tool, "completed")?;
+            self.completed_items.push((output_index, item.clone()));
+            events.push(ResponseSseEvent::ResponseOutputItemDone { output_index, item });
+        }
+        Ok(events)
+    }
+
+    fn tool_item(
+        &self,
+        tool: &ToolCallState,
+        status: &str,
+    ) -> Result<ResponseOutputItem, ApiError> {
+        self.tool_context.output_item(
+            tool.item_id.clone(),
+            status.into(),
+            tool.require_call_id()?,
+            tool.require_name()?,
+            tool.arguments.clone(),
+        )
+    }
+
+    fn is_custom_tool(&self, tool: &ToolCallState) -> bool {
+        tool.name
+            .as_ref()
+            .is_some_and(|name| self.tool_context.custom_tool_names().contains(name))
+    }
+
+    fn normalized_tool_calls(&self) -> Vec<ToolCallState> {
+        let mut normalized = Vec::new();
+        for tool_call in &self.tools {
+            if let Some(arguments) = split_concatenated_json_objects(&tool_call.arguments) {
+                for (idx, arguments) in arguments.into_iter().enumerate() {
+                    let mut split = tool_call.clone();
+                    split.chat_index = normalized.len() as u32;
+                    split.output_index = if idx == 0 { split.output_index } else { None };
+                    split.item_id = if idx == 0 {
+                        split.item_id
+                    } else {
+                        format!("fc_{}", Uuid::new_v4())
+                    };
+                    split.call_id = split.call_id.map(|call_id| {
+                        if idx == 0 {
+                            call_id
+                        } else {
+                            format!("{call_id}_{idx}")
+                        }
+                    });
+                    split.arguments = arguments;
+                    split.added = idx == 0 && split.added;
+                    split.done = false;
+                    normalized.push(split);
+                }
+            } else {
+                let mut tool_call = tool_call.clone();
+                tool_call.chat_index = normalized.len() as u32;
+                normalized.push(tool_call);
+            }
+        }
+        normalized
+    }
+}
+
+fn set_once(
+    slot: &mut Option<String>,
+    value: &str,
+    field: &str,
+    chat_index: u32,
+) -> Result<(), ApiError> {
+    match slot {
+        Some(existing) if existing != value => Err(ApiError::upstream_error(format!(
+            "streamed tool call at index {chat_index} changed {field} from '{existing}' to '{value}'"
+        ))),
+        Some(_) => Ok(()),
+        None => {
+            *slot = Some(value.to_string());
+            Ok(())
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
-    use super::StreamState;
-    use protocol::chat::{
-        ChatChunkChoice, ChatCompletionChunk, ChatDelta, ChatFunctionDelta, ChatToolCallDelta,
-    };
+    use super::*;
+    use protocol::chat::{ChatChunkChoice, ChatDelta, ChatFunctionDelta, ChatToolCallDelta};
     use protocol::common::Usage;
-    use protocol::responses::ResponseOutputItem;
-    use protocol::sse::ResponseSseEvent;
+    use protocol::responses::{CustomToolFormat, ResponseTool};
 
     fn chunk(
+        reasoning: Option<&str>,
         content: Option<&str>,
+        tool_calls: Option<Vec<ChatToolCallDelta>>,
         finish_reason: Option<&str>,
         usage: Option<Usage>,
         empty_choices: bool,
@@ -515,6 +657,8 @@ mod tests {
                     index: 0,
                     delta: ChatDelta {
                         content: content.map(str::to_string),
+                        reasoning_content: reasoning.map(str::to_string),
+                        tool_calls,
                         ..ChatDelta::default()
                     },
                     finish_reason: finish_reason.map(str::to_string),
@@ -524,367 +668,411 @@ mod tests {
         }
     }
 
-    fn completed_usage(events: &[ResponseSseEvent]) -> Usage {
-        events
+    fn state() -> StreamState {
+        StreamState::new(
+            "resp_test".into(),
+            "test-model".into(),
+            1,
+            "msg_test".into(),
+            ChatToolContext::default(),
+        )
+    }
+
+    fn tool_delta(
+        index: u32,
+        id: Option<&str>,
+        name: Option<&str>,
+        args: Option<&str>,
+    ) -> ChatToolCallDelta {
+        ChatToolCallDelta {
+            index,
+            id: id.map(str::to_string),
+            function: Some(ChatFunctionDelta {
+                name: name.map(str::to_string),
+                arguments: args.map(str::to_string),
+            }),
+        }
+    }
+
+    #[test]
+    fn streamed_reasoning_emits_summary_lifecycle_before_message() {
+        let mut state = state();
+        let mut events = state
+            .process_chunk(&chunk(Some("think"), None, None, None, None, false))
+            .unwrap();
+        events.extend(
+            state
+                .process_chunk(&chunk(None, Some("answer"), None, None, None, false))
+                .unwrap(),
+        );
+
+        let reasoning_done = events
             .iter()
-            .find_map(|event| match event {
-                ResponseSseEvent::ResponseCompleted { response } => response.usage.clone(),
-                _ => None,
+            .position(|event| {
+                matches!(
+                    event,
+                    ResponseSseEvent::ResponseOutputItemDone {
+                        item: ResponseOutputItem::Reasoning { .. },
+                        ..
+                    }
+                )
             })
-            .expect("response.completed usage")
-    }
-
-    fn tool_chunk(
-        tool_calls: Vec<ChatToolCallDelta>,
-        finish_reason: Option<&str>,
-    ) -> ChatCompletionChunk {
-        ChatCompletionChunk {
-            id: "chatcmpl_test".into(),
-            object: "chat.completion.chunk".into(),
-            created: 1,
-            model: "test-model".into(),
-            choices: Some(vec![ChatChunkChoice {
-                index: 0,
-                delta: ChatDelta {
-                    tool_calls: Some(tool_calls),
-                    ..ChatDelta::default()
-                },
-                finish_reason: finish_reason.map(str::to_string),
-            }]),
-            usage: None,
-        }
-    }
-
-    fn reasoning_chunk(text: &str) -> ChatCompletionChunk {
-        ChatCompletionChunk {
-            id: "chatcmpl_test".into(),
-            object: "chat.completion.chunk".into(),
-            created: 1,
-            model: "test-model".into(),
-            choices: Some(vec![ChatChunkChoice {
-                index: 0,
-                delta: ChatDelta {
-                    reasoning_content: Some(text.into()),
-                    ..ChatDelta::default()
-                },
-                finish_reason: None,
-            }]),
-            usage: None,
-        }
-    }
-
-    fn stream_state() -> StreamState {
-        StreamState::new(
-            "resp_test".into(),
-            "test-model".into(),
-            1,
-            "out_1".into(),
-            BTreeSet::new(),
-        )
-    }
-
-    fn stream_state_with_custom(name: &str) -> StreamState {
-        StreamState::new(
-            "resp_test".into(),
-            "test-model".into(),
-            1,
-            "out_1".into(),
-            BTreeSet::from([name.to_string()]),
-        )
+            .unwrap();
+        let message_added = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    ResponseSseEvent::ResponseOutputItemAdded {
+                        item: ResponseOutputItem::Message { .. },
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        assert!(reasoning_done < message_added);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ResponseSseEvent::ResponseReasoningSummaryTextDelta { delta, .. } if delta == "think"
+        )));
     }
 
     #[test]
-    fn complete_keeps_usage_from_final_empty_chunk() {
-        let mut state = stream_state();
+    fn text_preamble_then_tool_call_keeps_message_done_before_tool_done() {
+        let mut state = state();
+        let mut events = state
+            .process_chunk(&chunk(None, Some("checking"), None, None, None, false))
+            .unwrap();
+        events.extend(
+            state
+                .process_chunk(&chunk(
+                    None,
+                    None,
+                    Some(vec![tool_delta(
+                        0,
+                        Some("call_1"),
+                        Some("lookup"),
+                        Some("{\"q\":\"x\"}"),
+                    )]),
+                    Some("tool_calls"),
+                    None,
+                    false,
+                ))
+                .unwrap(),
+        );
+        events.extend(state.complete().unwrap());
 
-        state
-            .process_chunk(&chunk(Some("Hello"), None, None, false))
-            .expect("text chunk");
-        state
-            .process_chunk(&chunk(None, Some("stop"), None, false))
-            .expect("finish chunk");
-        state
-            .process_chunk(&chunk(
-                None,
-                None,
-                Some(Usage {
-                    input_tokens: 11,
-                    output_tokens: 7,
-                    total_tokens: 18,
-                    input_tokens_details: None,
-                    output_tokens_details: None,
-                }),
-                true,
-            ))
-            .expect("usage chunk");
-
-        let events = state.complete().expect("complete");
-        let usage = completed_usage(&events);
-        assert_eq!(usage.total_tokens, 18);
+        let message_done = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    ResponseSseEvent::ResponseOutputItemDone {
+                        item: ResponseOutputItem::Message { .. },
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let tool_done = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    ResponseSseEvent::ResponseOutputItemDone {
+                        item: ResponseOutputItem::FunctionCall { .. },
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        assert!(message_done < tool_done);
     }
 
     #[test]
-    fn complete_uses_latest_streamed_usage_totals() {
-        let mut state = stream_state();
+    fn reasoning_text_and_tool_call_finish_in_codex_order() {
+        let mut state = state();
+        let mut events = state
+            .process_chunk(&chunk(Some("think "), None, None, None, None, false))
+            .unwrap();
+        events.extend(
+            state
+                .process_chunk(&chunk(None, Some("checking"), None, None, None, false))
+                .unwrap(),
+        );
+        events.extend(
+            state
+                .process_chunk(&chunk(
+                    None,
+                    None,
+                    Some(vec![tool_delta(
+                        0,
+                        Some("call_1"),
+                        Some("lookup"),
+                        Some("{\"q\":\"x\"}"),
+                    )]),
+                    Some("tool_calls"),
+                    None,
+                    false,
+                ))
+                .unwrap(),
+        );
+        events.extend(state.complete().unwrap());
 
-        state
-            .process_chunk(&chunk(
-                Some("Hi"),
-                None,
-                Some(Usage {
-                    input_tokens: 10,
-                    output_tokens: 1,
-                    total_tokens: 11,
-                    input_tokens_details: None,
-                    output_tokens_details: None,
-                }),
-                false,
-            ))
-            .expect("first chunk");
-        state
-            .process_chunk(&chunk(
-                None,
-                Some("stop"),
-                Some(Usage {
-                    input_tokens: 10,
-                    output_tokens: 3,
-                    total_tokens: 13,
-                    input_tokens_details: None,
-                    output_tokens_details: None,
-                }),
-                false,
-            ))
-            .expect("final chunk");
+        let reasoning_done = done_position(&events, "reasoning");
+        let message_added = added_position(&events, "message");
+        let message_done = done_position(&events, "message");
+        let tool_done = done_position(&events, "function_call");
+        let completed = events
+            .iter()
+            .position(|event| matches!(event, ResponseSseEvent::ResponseCompleted { .. }))
+            .unwrap();
 
-        let events = state.complete().expect("complete");
-        let usage = completed_usage(&events);
-        assert_eq!(usage.total_tokens, 13);
+        assert!(reasoning_done < message_added);
+        assert!(message_added < message_done);
+        assert!(message_done < tool_done);
+        assert!(tool_done < completed);
     }
 
     #[test]
-    fn tool_only_stream_does_not_create_empty_message_item() {
-        let mut state = stream_state();
-
-        let events = state
-            .process_chunk(&tool_chunk(
-                vec![ChatToolCallDelta {
-                    index: 0,
-                    id: Some("call_1".into()),
-                    function: Some(ChatFunctionDelta {
-                        name: Some("exec_command".into()),
-                        arguments: Some(r#"{"cmd":"ls"}"#.into()),
-                    }),
-                }],
+    fn pure_tool_call_does_not_emit_empty_message() {
+        let mut state = state();
+        let mut events = state
+            .process_chunk(&chunk(
+                None,
+                None,
+                Some(vec![tool_delta(
+                    0,
+                    Some("call_1"),
+                    Some("lookup"),
+                    Some("{\"q\":\"x\"}"),
+                )]),
                 Some("tool_calls"),
+                None,
+                false,
             ))
-            .expect("tool chunk");
+            .unwrap();
+        events.extend(state.complete().unwrap());
 
         assert!(!events.iter().any(|event| matches!(
             event,
-            ResponseSseEvent::ResponseOutputItemAdded {
+            ResponseSseEvent::ResponseOutputItemDone {
                 item: ResponseOutputItem::Message { .. },
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn parallel_tool_calls_have_stable_output_order() {
+        let mut state = state();
+        let mut events = state
+            .process_chunk(&chunk(
+                None,
+                None,
+                Some(vec![
+                    tool_delta(0, Some("call_a"), Some("lookup_a"), Some("{\"q\":\"a\"}")),
+                    tool_delta(1, Some("call_b"), Some("lookup_b"), Some("{\"q\":\"b\"}")),
+                ]),
+                Some("tool_calls"),
+                None,
+                false,
+            ))
+            .unwrap();
+        events.extend(state.complete().unwrap());
+
+        let added_indexes = events
+            .iter()
+            .filter_map(|event| match event {
+                ResponseSseEvent::ResponseOutputItemAdded {
+                    output_index,
+                    item: ResponseOutputItem::FunctionCall { .. },
+                } => Some(*output_index),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(added_indexes, vec![0, 1]);
+
+        let completed_output = events
+            .iter()
+            .find_map(|event| match event {
+                ResponseSseEvent::ResponseCompleted { response } => response.output.as_ref(),
+                _ => None,
+            })
+            .unwrap();
+        let names = completed_output
+            .iter()
+            .map(|item| match item {
+                ResponseOutputItem::FunctionCall { name, .. } => name.as_str(),
+                other => panic!("expected function call output item, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["lookup_a", "lookup_b"]);
+    }
+
+    #[test]
+    fn missing_tool_name_fails_closed() {
+        let mut state = state();
+        state
+            .process_chunk(&chunk(
+                None,
+                None,
+                Some(vec![tool_delta(0, Some("call_1"), None, Some("{}"))]),
+                Some("tool_calls"),
+                None,
+                false,
+            ))
+            .unwrap();
+        let err = state.complete().unwrap_err();
+        assert!(err.to_string().contains("missing required function.name"));
+    }
+
+    #[test]
+    fn missing_tool_call_id_fails_closed() {
+        let mut state = state();
+        state
+            .process_chunk(&chunk(
+                None,
+                None,
+                Some(vec![tool_delta(0, None, Some("lookup"), Some("{}"))]),
+                Some("tool_calls"),
+                None,
+                false,
+            ))
+            .unwrap();
+        let err = state.complete().unwrap_err();
+        assert!(err.to_string().contains("missing required call_id"));
+    }
+
+    #[test]
+    fn usage_chunk_with_empty_choices_is_preserved() {
+        let mut state = state();
+        state
+            .process_chunk(&chunk(None, Some("ok"), None, None, None, false))
+            .unwrap();
+        state
+            .process_chunk(&chunk(
+                None,
+                None,
+                None,
+                None,
+                Some(Usage {
+                    input_tokens: 2,
+                    output_tokens: 1,
+                    total_tokens: 3,
+                    ..Usage::default()
+                }),
+                true,
+            ))
+            .unwrap();
+        let events = state.complete().unwrap();
         assert!(events.iter().any(|event| matches!(
             event,
-            ResponseSseEvent::ResponseOutputItemAdded {
-                item: ResponseOutputItem::FunctionCall { call_id, .. },
-                ..
-            } if call_id == "call_1"
+            ResponseSseEvent::ResponseCompleted {
+                response: SseResponseShell {
+                    usage: Some(Usage {
+                        total_tokens: 3,
+                        ..
+                    }),
+                    ..
+                }
+            }
         )));
     }
 
     #[test]
-    fn reasoning_before_tool_does_not_create_empty_message_item() {
-        let mut state = stream_state();
-
-        let reasoning_events = state
-            .process_chunk(&reasoning_chunk("thinking"))
-            .expect("reasoning chunk");
-
-        assert!(
-            reasoning_events
-                .iter()
-                .all(|event| !matches!(event, ResponseSseEvent::ResponseOutputItemAdded { .. }))
+    fn custom_tool_restores_input() {
+        let context = ChatToolContext::from_response_tools(&[ResponseTool::Custom {
+            name: "apply_patch".into(),
+            description: "Apply a patch".into(),
+            format: CustomToolFormat {
+                format_type: "grammar".into(),
+                syntax: "lark".into(),
+                definition: "start: /.+/".into(),
+            },
+        }]);
+        let mut state = StreamState::new(
+            "resp_test".into(),
+            "test-model".into(),
+            1,
+            "msg_test".into(),
+            context,
         );
-
-        let tool_events = state
-            .process_chunk(&tool_chunk(
-                vec![ChatToolCallDelta {
-                    index: 0,
-                    id: Some("call_1".into()),
-                    function: Some(ChatFunctionDelta {
-                        name: Some("exec_command".into()),
-                        arguments: Some(r#"{"cmd":"ls"}"#.into()),
-                    }),
-                }],
+        state
+            .process_chunk(&chunk(
+                None,
+                None,
+                Some(vec![tool_delta(
+                    0,
+                    Some("call_1"),
+                    Some("apply_patch"),
+                    Some("{\"input\":\"patch\"}"),
+                )]),
                 Some("tool_calls"),
+                None,
+                false,
             ))
-            .expect("tool chunk");
-
-        assert!(tool_events.iter().any(|event| matches!(
-            event,
-            ResponseSseEvent::ResponseOutputItemAdded {
-                item: ResponseOutputItem::FunctionCall { call_id, .. },
-                ..
-            } if call_id == "call_1"
-        )));
-    }
-
-    #[test]
-    fn custom_tool_stream_emits_custom_input_delta_and_items() {
-        let mut state = stream_state_with_custom("apply_patch");
-        let input = "*** Begin Patch\n*** End Patch";
-
-        let added_events = state
-            .process_chunk(&tool_chunk(
-                vec![ChatToolCallDelta {
-                    index: 0,
-                    id: Some("call_patch".into()),
-                    function: Some(ChatFunctionDelta {
-                        name: Some("apply_patch".into()),
-                        arguments: Some(serde_json::json!({ "input": input }).to_string()),
-                    }),
-                }],
-                Some("tool_calls"),
-            ))
-            .expect("custom tool chunk");
-
-        assert!(matches!(
-            &added_events[1],
-            ResponseSseEvent::ResponseOutputItemAdded {
-                item: ResponseOutputItem::CustomToolCall { name, input, .. },
-                ..
-            } if name == "apply_patch" && input.is_empty()
-        ));
-        assert!(!added_events.iter().any(|event| {
-            matches!(
-                event,
-                ResponseSseEvent::ResponseFunctionCallArgumentsDelta { .. }
-            )
-        }));
-
-        let events = state.complete().expect("complete");
-        assert!(events.iter().any(|event| matches!(
-            event,
-            ResponseSseEvent::ResponseCustomToolCallInputDelta { delta, .. } if delta == input
-        )));
+            .unwrap();
+        let events = state.complete().unwrap();
         assert!(events.iter().any(|event| matches!(
             event,
             ResponseSseEvent::ResponseOutputItemDone {
-                item: ResponseOutputItem::CustomToolCall { name, input: done_input, .. },
+                item: ResponseOutputItem::CustomToolCall { input, .. },
                 ..
-            } if name == "apply_patch" && done_input == input
+            } if input == "patch"
         )));
     }
 
-    #[test]
-    fn complete_keeps_multiple_tool_call_arguments_separate() {
-        let mut state = stream_state();
-
-        let first_args = r#"{"cmd":"cat fixture.py"}"#;
-        let second_args = r#"{"cmd":"cat fixture.json"}"#;
-
-        state
-            .process_chunk(&tool_chunk(
-                vec![
-                    ChatToolCallDelta {
-                        index: 0,
-                        id: Some("call_1".into()),
-                        function: Some(ChatFunctionDelta {
-                            name: Some("exec_command".into()),
-                            arguments: Some(first_args.into()),
-                        }),
-                    },
-                    ChatToolCallDelta {
-                        index: 1,
-                        id: Some("call_2".into()),
-                        function: Some(ChatFunctionDelta {
-                            name: Some("exec_command".into()),
-                            arguments: Some(second_args.into()),
-                        }),
-                    },
-                ],
-                Some("tool_calls"),
-            ))
-            .expect("tool chunks");
-
-        let events = state.complete().expect("complete");
-        let completed = events
+    fn added_position(events: &[ResponseSseEvent], item_type: &str) -> usize {
+        events
             .iter()
-            .find_map(|event| match event {
-                ResponseSseEvent::ResponseCompleted { response } => response.output.as_ref(),
-                _ => None,
+            .position(|event| match (item_type, event) {
+                (
+                    "message",
+                    ResponseSseEvent::ResponseOutputItemAdded {
+                        item: ResponseOutputItem::Message { .. },
+                        ..
+                    },
+                ) => true,
+                (
+                    "function_call",
+                    ResponseSseEvent::ResponseOutputItemAdded {
+                        item: ResponseOutputItem::FunctionCall { .. },
+                        ..
+                    },
+                ) => true,
+                _ => false,
             })
-            .expect("response.completed output");
-
-        let args: Vec<&str> = completed
-            .iter()
-            .filter_map(|item| match item {
-                ResponseOutputItem::FunctionCall { arguments, .. } => Some(arguments.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(args, vec![first_args, second_args]);
-        assert!(
-            state
-                .chat_tool_calls()
-                .iter()
-                .all(
-                    |tc| serde_json::from_str::<serde_json::Value>(&tc.function.arguments).is_ok()
-                )
-        );
+            .unwrap()
     }
 
-    #[test]
-    fn complete_splits_concatenated_single_tool_call_arguments() {
-        let mut state = stream_state();
-
-        state
-            .process_chunk(&tool_chunk(
-                vec![ChatToolCallDelta {
-                    index: 0,
-                    id: Some("call_1".into()),
-                    function: Some(ChatFunctionDelta {
-                        name: Some("exec_command".into()),
-                        arguments: Some(r#"{"cmd":"a"}{"cmd":"b"}"#.into()),
-                    }),
-                }],
-                Some("tool_calls"),
-            ))
-            .expect("tool chunk");
-
-        let events = state.complete().expect("complete");
-        let completed = events
+    fn done_position(events: &[ResponseSseEvent], item_type: &str) -> usize {
+        events
             .iter()
-            .find_map(|event| match event {
-                ResponseSseEvent::ResponseCompleted { response } => response.output.as_ref(),
-                _ => None,
+            .position(|event| match (item_type, event) {
+                (
+                    "reasoning",
+                    ResponseSseEvent::ResponseOutputItemDone {
+                        item: ResponseOutputItem::Reasoning { .. },
+                        ..
+                    },
+                ) => true,
+                (
+                    "message",
+                    ResponseSseEvent::ResponseOutputItemDone {
+                        item: ResponseOutputItem::Message { .. },
+                        ..
+                    },
+                ) => true,
+                (
+                    "function_call",
+                    ResponseSseEvent::ResponseOutputItemDone {
+                        item: ResponseOutputItem::FunctionCall { .. },
+                        ..
+                    },
+                ) => true,
+                _ => false,
             })
-            .expect("response.completed output");
-
-        let calls: Vec<(&str, &str)> = completed
-            .iter()
-            .filter_map(|item| match item {
-                ResponseOutputItem::FunctionCall {
-                    call_id, arguments, ..
-                } => Some((call_id.as_str(), arguments.as_str())),
-                _ => None,
-            })
-            .collect();
-
-        assert_eq!(
-            calls,
-            vec![("call_1", r#"{"cmd":"a"}"#), ("call_1_1", r#"{"cmd":"b"}"#)]
-        );
-        assert!(
-            state
-                .chat_tool_calls()
-                .iter()
-                .all(
-                    |tc| serde_json::from_str::<serde_json::Value>(&tc.function.arguments).is_ok()
-                )
-        );
+            .unwrap()
     }
 }

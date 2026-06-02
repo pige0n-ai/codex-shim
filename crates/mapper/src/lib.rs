@@ -3,6 +3,7 @@ use protocol::chat::ChatMessage;
 use protocol::responses::ResponsesCreateRequest;
 
 pub mod apply_patch_tool;
+pub mod chat_tool_context;
 pub mod custom_tools;
 pub mod error_mapper;
 pub mod input_mapper;
@@ -53,6 +54,7 @@ impl Default for MappingConfig {
 #[derive(Debug)]
 pub struct MappedChatRequest {
     pub chat_request: ChatCompletionRequest,
+    pub tool_context: chat_tool_context::ChatToolContext,
     /// Pre-generated UUID for the response
     pub response_id: String,
     /// Pre-generated UUIDs for output items (message, function_call, etc.)
@@ -134,9 +136,14 @@ pub fn responses_to_chat(
 
     // 5. Provider-specific pre-send normalization
     reasoning_mapper::normalize_sampling_params(&mut chat_req, req, config);
+    let tool_context = chat_tool_context::ChatToolContext::from_response_tools(
+        req.tools.as_deref().unwrap_or(&[]),
+    );
+    tool_context.apply_to_chat_request(&mut chat_req);
 
     Ok(MappedChatRequest {
         chat_request: chat_req,
+        tool_context,
         response_id,
         output_item_ids: vec![item_id],
         warnings,
@@ -158,9 +165,13 @@ pub fn responses_to_chat_via_canonical(
     let mut chat_request = canonical.into_chat_request(caps);
     tool_mapper::apply_chat_tool_mapping_overrides(&mut chat_request, config);
     input_mapper::apply_chat_history_mapping_overrides(&mut chat_request.messages, config)?;
+    let tool_context =
+        chat_tool_context::ChatToolContext::from_response_tools(&canonical.response_tools_raw);
+    tool_context.apply_to_chat_request(&mut chat_request);
 
     Ok(MappedChatRequest {
         chat_request,
+        tool_context,
         response_id,
         output_item_ids: vec![item_id],
         warnings,
