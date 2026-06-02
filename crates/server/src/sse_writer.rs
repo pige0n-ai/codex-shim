@@ -45,8 +45,23 @@ fn sse_event_type(event: &ResponseSseEvent) -> &str {
         ResponseSseEvent::ResponseFunctionCallArgumentsDone { .. } => {
             "response.function_call_arguments.done"
         }
+        ResponseSseEvent::ResponseReasoningSummaryPartAdded { .. } => {
+            "response.reasoning_summary_part.added"
+        }
+        ResponseSseEvent::ResponseReasoningSummaryTextDelta { .. } => {
+            "response.reasoning_summary_text.delta"
+        }
+        ResponseSseEvent::ResponseReasoningSummaryTextDone { .. } => {
+            "response.reasoning_summary_text.done"
+        }
+        ResponseSseEvent::ResponseReasoningSummaryPartDone { .. } => {
+            "response.reasoning_summary_part.done"
+        }
         ResponseSseEvent::ResponseCustomToolCallInputDelta { .. } => {
             "response.custom_tool_call_input.delta"
+        }
+        ResponseSseEvent::ResponseCustomToolCallInputDone { .. } => {
+            "response.custom_tool_call_input.done"
         }
         ResponseSseEvent::ResponseCompleted { .. } => "response.completed",
         ResponseSseEvent::ResponseFailed { .. } => "response.failed",

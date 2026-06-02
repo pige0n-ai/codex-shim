@@ -353,17 +353,23 @@ impl StreamState {
             for tool_call in &tool_calls {
                 if tool_call.is_custom(&self.custom_tool_names) {
                     let name = tool_call.name.clone().unwrap_or_default();
+                    let input = custom_tool_input_from_arguments(&name, &tool_call.arguments)?;
                     events.push(ResponseSseEvent::ResponseCustomToolCallInputDelta {
                         item_id: tool_call.item_id.clone(),
                         output_index: tool_call.index,
-                        delta: custom_tool_input_from_arguments(&name, &tool_call.arguments)?,
+                        delta: input.clone(),
+                    });
+                    events.push(ResponseSseEvent::ResponseCustomToolCallInputDone {
+                        item_id: tool_call.item_id.clone(),
+                        output_index: tool_call.index,
+                        input,
                     });
                 } else {
                     events.push(ResponseSseEvent::ResponseFunctionCallArgumentsDone {
                         item_id: tool_call.item_id.clone(),
                         output_index: tool_call.index,
                         arguments: tool_call.arguments.clone(),
-                        name: tool_call.name.clone().unwrap_or_default(),
+                        name: tool_call.name.clone(),
                     });
                 }
             }

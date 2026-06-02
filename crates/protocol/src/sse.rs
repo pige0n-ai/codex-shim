@@ -70,7 +70,47 @@ pub enum ResponseSseEvent {
         item_id: String,
         output_index: u32,
         arguments: String,
-        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+
+    #[serde(rename = "response.reasoning_summary_part.added")]
+    ResponseReasoningSummaryPartAdded {
+        item_id: String,
+        output_index: u32,
+        summary_index: u32,
+        part: crate::responses::SummaryPart,
+    },
+
+    #[serde(rename = "response.reasoning_summary_text.delta")]
+    ResponseReasoningSummaryTextDelta {
+        item_id: String,
+        output_index: u32,
+        summary_index: u32,
+        delta: String,
+    },
+
+    #[serde(rename = "response.reasoning_summary_text.done")]
+    ResponseReasoningSummaryTextDone {
+        item_id: String,
+        output_index: u32,
+        summary_index: u32,
+        text: String,
+    },
+
+    #[serde(rename = "response.reasoning_summary_part.done")]
+    ResponseReasoningSummaryPartDone {
+        item_id: String,
+        output_index: u32,
+        summary_index: u32,
+        part: crate::responses::SummaryPart,
+    },
+
+    #[serde(rename = "response.custom_tool_call_input.done")]
+    ResponseCustomToolCallInputDone {
+        item_id: String,
+        output_index: u32,
+        input: String,
     },
 
     #[serde(rename = "response.custom_tool_call_input.delta")]
