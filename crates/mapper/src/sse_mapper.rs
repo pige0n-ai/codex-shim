@@ -473,13 +473,16 @@ impl StreamState {
                 .name
                 .as_deref()
                 .is_some_and(|value| !value.is_empty())
+            && !self.is_tool_search(&self.tools[pos])
         {
             let output_index = self.next_output_index();
             self.tools[pos].output_index = Some(output_index);
             self.tools[pos].added = true;
             let item = self.tool_item(&self.tools[pos], "in_progress")?;
             events.push(ResponseSseEvent::ResponseOutputItemAdded { output_index, item });
-            if !self.is_custom_tool(&self.tools[pos]) && !self.tools[pos].arguments.is_empty() {
+            if self.emits_function_arguments_events(&self.tools[pos])
+                && !self.tools[pos].arguments.is_empty()
+            {
                 events.push(ResponseSseEvent::ResponseFunctionCallArgumentsDelta {
                     item_id: self.tools[pos].item_id.clone(),
                     output_index,
@@ -487,7 +490,7 @@ impl StreamState {
                 });
             }
         } else if self.tools[pos].added
-            && !self.is_custom_tool(&self.tools[pos])
+            && self.emits_function_arguments_events(&self.tools[pos])
             && let Some(arguments) = tool_call
                 .function
                 .as_ref()
@@ -538,10 +541,15 @@ impl StreamState {
                     events.push(ResponseSseEvent::ResponseCustomToolCallInputDelta {
                         item_id: tool.item_id.clone(),
                         output_index,
-                        delta: input,
+                        delta: input.clone(),
                     });
                 }
-            } else {
+                events.push(ResponseSseEvent::ResponseCustomToolCallInputDone {
+                    item_id: tool.item_id.clone(),
+                    output_index,
+                    input,
+                });
+            } else if self.emits_function_arguments_events(&tool) {
                 events.push(ResponseSseEvent::ResponseFunctionCallArgumentsDone {
                     item_id: tool.item_id.clone(),
                     output_index,
@@ -574,7 +582,17 @@ impl StreamState {
     fn is_custom_tool(&self, tool: &ToolCallState) -> bool {
         tool.name
             .as_ref()
-            .is_some_and(|name| self.tool_context.custom_tool_names().contains(name))
+            .is_some_and(|name| self.tool_context.is_custom_tool_name(name))
+    }
+
+    fn is_tool_search(&self, tool: &ToolCallState) -> bool {
+        tool.name
+            .as_ref()
+            .is_some_and(|name| self.tool_context.is_tool_search_name(name))
+    }
+
+    fn emits_function_arguments_events(&self, tool: &ToolCallState) -> bool {
+        !self.is_custom_tool(tool) && !self.is_tool_search(tool)
     }
 
     fn normalized_tool_calls(&self) -> Vec<ToolCallState> {
@@ -1016,10 +1034,78 @@ mod tests {
         let events = state.complete().unwrap();
         assert!(events.iter().any(|event| matches!(
             event,
+            ResponseSseEvent::ResponseCustomToolCallInputDone { input, .. } if input == "patch"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
             ResponseSseEvent::ResponseOutputItemDone {
                 item: ResponseOutputItem::CustomToolCall { input, .. },
                 ..
             } if input == "patch"
+        )));
+    }
+
+    #[test]
+    fn tool_search_waits_for_complete_streamed_arguments() {
+        let context =
+            ChatToolContext::from_response_tools(&[ResponseTool::ToolSearch { description: None }]);
+        let mut state = StreamState::new(
+            "resp_test".into(),
+            "test-model".into(),
+            1,
+            "msg_test".into(),
+            context,
+        );
+
+        let first_events = state
+            .process_chunk(&chunk(
+                None,
+                None,
+                Some(vec![tool_delta(
+                    0,
+                    Some("call_1"),
+                    Some("tool_search"),
+                    Some("{\"qu"),
+                )]),
+                None,
+                None,
+                false,
+            ))
+            .unwrap();
+        assert!(!first_events.iter().any(|event| matches!(
+            event,
+            ResponseSseEvent::ResponseOutputItemAdded {
+                item: ResponseOutputItem::ToolSearchCall { .. },
+                ..
+            }
+        )));
+
+        let mut events = first_events;
+        events.extend(
+            state
+                .process_chunk(&chunk(
+                    None,
+                    None,
+                    Some(vec![tool_delta(0, None, None, Some("ery\":\"rg\"}"))]),
+                    Some("tool_calls"),
+                    None,
+                    false,
+                ))
+                .unwrap(),
+        );
+        events.extend(state.complete().unwrap());
+
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            ResponseSseEvent::ResponseFunctionCallArgumentsDelta { .. }
+                | ResponseSseEvent::ResponseFunctionCallArgumentsDone { .. }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ResponseSseEvent::ResponseOutputItemDone {
+                item: ResponseOutputItem::ToolSearchCall { arguments, .. },
+                ..
+            } if arguments["query"] == "rg"
         )));
     }
 

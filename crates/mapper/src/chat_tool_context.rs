@@ -45,6 +45,18 @@ impl ChatToolContext {
             .collect()
     }
 
+    pub fn is_custom_tool_name(&self, name: &str) -> bool {
+        self.specs_by_chat_name
+            .get(name)
+            .is_some_and(|spec| matches!(spec.kind, ChatToolKind::Custom))
+    }
+
+    pub fn is_tool_search_name(&self, name: &str) -> bool {
+        self.specs_by_chat_name
+            .get(name)
+            .is_some_and(|spec| matches!(spec.kind, ChatToolKind::ToolSearch))
+    }
+
     pub fn apply_to_chat_request(&self, request: &mut ChatCompletionRequest) {
         if let Some(tools) = &mut request.tools {
             for tool in tools {
