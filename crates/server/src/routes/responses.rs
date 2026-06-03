@@ -2457,7 +2457,7 @@ fn validate_function_call_output(obj: &Map<String, Value>, path: &str) -> Result
 }
 
 fn validate_reasoning_item(obj: &Map<String, Value>, path: &str) -> Result<(), ApiError> {
-    if let Some(content) = obj.get("content") {
+    if let Some(content) = obj.get("content").filter(|content| !content.is_null()) {
         let parts = content.as_array().ok_or_else(|| {
             ApiError::invalid_parameter(
                 format!("{path}.content"),
@@ -2473,8 +2473,12 @@ fn validate_reasoning_item(obj: &Map<String, Value>, path: &str) -> Result<(), A
                     "reasoning content parts must include a string 'type' field",
                 )
             })?;
-            if part_type != "output_text" {
-                return Err(ApiError::unsupported_content_part(part_type));
+            if !matches!(part_type, "reasoning_text" | "text" | "output_text") {
+                return Err(ApiError::invalid_parameter(
+                    format!("{path}.content[{idx}]"),
+                    "unsupported_reasoning_content",
+                    format!("reasoning content part type '{part_type}' is not supported"),
+                ));
             }
         }
     }
@@ -2754,6 +2758,35 @@ mod tests {
 
         assert_eq!(err.error.param.as_deref(), Some("input[0].input"));
         assert_eq!(err.error.code.as_deref(), Some("invalid_custom_tool_input"));
+    }
+
+    #[test]
+    fn validate_reasoning_item_accepts_codex_reasoning_content_shapes() {
+        let with_null_content = serde_json::json!({
+            "type": "reasoning",
+            "content": null,
+            "summary": [{"type": "summary_text", "text": "summary"}]
+        });
+        validate_input_item(&with_null_content, "input[3]").unwrap();
+
+        let with_reasoning_text = serde_json::json!({
+            "type": "reasoning",
+            "content": [{"type": "reasoning_text", "text": "raw"}]
+        });
+        validate_input_item(&with_reasoning_text, "input[3]").unwrap();
+    }
+
+    #[test]
+    fn validate_reasoning_item_rejects_non_array_content() {
+        let item = serde_json::json!({
+            "type": "reasoning",
+            "content": "raw"
+        });
+
+        let err = validate_input_item(&item, "input[3]").unwrap_err();
+
+        assert_eq!(err.error.param.as_deref(), Some("input[3].content"));
+        assert_eq!(err.error.code.as_deref(), Some("invalid_reasoning_content"));
     }
 
     #[test]

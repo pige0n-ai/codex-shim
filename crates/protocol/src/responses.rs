@@ -169,7 +169,7 @@ pub enum InputItem {
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        content: Option<Vec<ContentPart>>,
+        content: Option<Vec<ReasoningContentPart>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         summary: Option<Vec<SummaryPart>>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -218,6 +218,21 @@ impl Default for MessageContent {
 pub enum SummaryPart {
     #[serde(rename = "summary_text")]
     SummaryText { text: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ReasoningContentPart {
+    #[serde(rename = "reasoning_text")]
+    ReasoningText { text: String },
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "output_text")]
+    OutputText {
+        text: String,
+        #[serde(default)]
+        annotations: Vec<crate::common::Annotation>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -425,7 +440,7 @@ pub enum ResponseOutputItem {
     Reasoning {
         id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        content: Option<Vec<ContentPart>>,
+        content: Option<Vec<ReasoningContentPart>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         summary: Option<Vec<SummaryPart>>,
         #[serde(skip_serializing_if = "Option::is_none")]

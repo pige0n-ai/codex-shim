@@ -814,9 +814,8 @@ mod tests {
             model: "deepseek-v4-pro".into(),
             input: ResponseInput::Items(vec![InputItem::Reasoning {
                 id: None,
-                content: Some(vec![protocol::common::ContentPart::OutputText {
+                content: Some(vec![ReasoningContentPart::ReasoningText {
                     text: "thinking".into(),
-                    annotations: vec![],
                 }]),
                 summary: None,
                 status: None,
