@@ -1,7 +1,7 @@
 use protocol::chat::{ChatContent, ChatMessage};
 use protocol::error::ApiError;
 use protocol::responses::{
-    InputItem, InputMessageRole, MessageContent, ResponseInput, SummaryPart,
+    InputItem, InputMessageRole, MessageContent, ReasoningContentPart, ResponseInput, SummaryPart,
 };
 
 use crate::MappingConfig;
@@ -502,16 +502,17 @@ fn map_parts(parts: &[protocol::common::ContentPart]) -> Result<ChatContent, Api
 /// The response puts reasoning into `summary` (SummaryText), so roundtrip
 /// needs to read both sources.
 fn extract_reasoning_text(
-    content: Option<Vec<protocol::common::ContentPart>>,
+    content: Option<Vec<ReasoningContentPart>>,
     summary: Option<Vec<SummaryPart>>,
 ) -> String {
     // Try content first
     if let Some(parts) = content {
         let text: String = parts
             .iter()
-            .filter_map(|p| match p {
-                protocol::common::ContentPart::OutputText { text, .. } => Some(text.as_str()),
-                _ => None,
+            .map(|p| match p {
+                ReasoningContentPart::ReasoningText { text }
+                | ReasoningContentPart::Text { text }
+                | ReasoningContentPart::OutputText { text, .. } => text.as_str(),
             })
             .collect::<Vec<_>>()
             .join("");

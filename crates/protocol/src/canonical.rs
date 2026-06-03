@@ -9,8 +9,9 @@ use crate::common::ContentPart;
 use crate::error::ApiError;
 use crate::provider_caps::{ProviderCapabilities, ReasoningPolicy, ToolPolicy};
 use crate::responses::{
-    InputItem, InputMessageRole, MessageContent, NamespaceTool, ResponseInput, ResponseTool,
-    ResponsesCreateRequest, TextFormat, ToolChoice as ResponsesToolChoice,
+    InputItem, InputMessageRole, MessageContent, NamespaceTool, ReasoningContentPart,
+    ResponseInput, ResponseTool, ResponsesCreateRequest, TextFormat,
+    ToolChoice as ResponsesToolChoice,
 };
 
 // ── Canonical IR ──────────────────────────────────────────────────
@@ -794,15 +795,16 @@ fn value_to_string(val: &Value) -> String {
 }
 
 fn extract_reasoning_text(
-    content: Option<&Vec<ContentPart>>,
+    content: Option<&Vec<ReasoningContentPart>>,
     summary: Option<&Vec<crate::responses::SummaryPart>>,
 ) -> String {
     if let Some(parts) = content {
         let text: String = parts
             .iter()
-            .filter_map(|p| match p {
-                ContentPart::OutputText { text, .. } => Some(text.as_str()),
-                _ => None,
+            .map(|p| match p {
+                ReasoningContentPart::ReasoningText { text }
+                | ReasoningContentPart::Text { text }
+                | ReasoningContentPart::OutputText { text, .. } => text.as_str(),
             })
             .collect::<Vec<_>>()
             .join("");

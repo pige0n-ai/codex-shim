@@ -373,9 +373,8 @@ mod tests {
             model: "test".into(),
             input: ResponseInput::Items(vec![InputItem::Reasoning {
                 id: None,
-                content: Some(vec![protocol::common::ContentPart::OutputText {
+                content: Some(vec![ReasoningContentPart::ReasoningText {
                     text: "thinking".into(),
-                    annotations: vec![],
                 }]),
                 summary: None,
                 status: None,
@@ -385,6 +384,43 @@ mod tests {
 
         let err = CanonicalRequest::from_request(&req, vec![]).unwrap_err();
         assert!(err.contains("reasoning items must be followed"));
+    }
+
+    #[test]
+    fn reasoning_text_content_attaches_to_following_function_call() {
+        let req = ResponsesCreateRequest {
+            model: "test".into(),
+            input: ResponseInput::Items(vec![
+                InputItem::Reasoning {
+                    id: None,
+                    content: Some(vec![ReasoningContentPart::ReasoningText {
+                        text: "raw reasoning".into(),
+                    }]),
+                    summary: Some(vec![SummaryPart::SummaryText {
+                        text: "summary fallback".into(),
+                    }]),
+                    status: None,
+                },
+                InputItem::FunctionCall {
+                    id: None,
+                    call_id: "call_1".into(),
+                    name: "exec_command".into(),
+                    arguments: "{}".into(),
+                    status: None,
+                },
+            ]),
+            ..default_req()
+        };
+
+        let chat = CanonicalRequest::from_request(&req, vec![])
+            .expect("canonical request")
+            .into_chat_request(&ProviderCapabilities::default());
+        match &chat.messages[0] {
+            ChatMessage::Assistant {
+                reasoning_content, ..
+            } => assert_eq!(reasoning_content.as_deref(), Some("raw reasoning")),
+            _ => panic!("expected assistant message"),
+        }
     }
 
     #[test]
