@@ -11,9 +11,15 @@ pub struct Usage {
     #[serde(alias = "completion_tokens")]
     pub output_tokens: u32,
     pub total_tokens: u32,
-    #[serde(alias = "prompt_tokens_details", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        alias = "prompt_tokens_details",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub input_tokens_details: Option<InputTokensDetails>,
-    #[serde(alias = "completion_tokens_details", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        alias = "completion_tokens_details",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub output_tokens_details: Option<OutputTokensDetails>,
 }
 
