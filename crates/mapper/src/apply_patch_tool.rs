@@ -142,6 +142,30 @@ pub fn structured_arguments_to_patch(arguments: &str) -> Result<String, ApiError
     }
 }
 
+pub fn native_input_from_chat_arguments(arguments: &str) -> String {
+    let Ok(value) = serde_json::from_str::<Value>(arguments) else {
+        return arguments.to_string();
+    };
+
+    if let Some(input) = single_string_input(&value) {
+        return input;
+    }
+
+    if value.get("hunks").is_some() || value.get("raw_patch").is_some() {
+        return structured_arguments_to_patch(arguments).unwrap_or_else(|_| arguments.to_string());
+    }
+
+    arguments.to_string()
+}
+
+fn single_string_input(value: &Value) -> Option<String> {
+    let object = value.as_object()?;
+    if object.len() != 1 {
+        return None;
+    }
+    object.get("input")?.as_str().map(ToOwned::to_owned)
+}
+
 #[derive(Debug, Deserialize)]
 struct StructuredPatch {
     hunks: Vec<Hunk>,
@@ -454,6 +478,42 @@ mod tests {
             error
                 .to_string()
                 .contains("include a non-empty raw_patch fallback")
+        );
+    }
+
+    #[test]
+    fn native_input_preserves_unconvertible_chat_arguments() {
+        assert_eq!(native_input_from_chat_arguments("[not json"), "[not json");
+
+        let args = serde_json::json!({
+            "hunks": [{
+                "path": "a.txt",
+                "changes": [{
+                    "anchor": null,
+                    "lines": [{"op": "add", "text": "new"}]
+                }]
+            }]
+        });
+        assert_eq!(
+            native_input_from_chat_arguments(&args.to_string()),
+            args.to_string()
+        );
+    }
+
+    #[test]
+    fn native_input_prefers_valid_input_or_structured_patch() {
+        assert_eq!(
+            native_input_from_chat_arguments(r#"{"input":"*** Begin Patch\n*** End Patch"}"#),
+            "*** Begin Patch\n*** End Patch"
+        );
+
+        let args = serde_json::json!({
+            "raw_patch": "*** Begin Patch\n*** End Patch",
+            "hunks": []
+        });
+        assert_eq!(
+            native_input_from_chat_arguments(&args.to_string()),
+            "*** Begin Patch\n*** End Patch"
         );
     }
 

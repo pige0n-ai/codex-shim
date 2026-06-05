@@ -49,16 +49,9 @@ Freeform format:\n\
 
 pub fn custom_tool_input_from_arguments(name: &str, arguments: &str) -> Result<String, ApiError> {
     if name == apply_patch_tool::APPLY_PATCH_TOOL_NAME {
-        let value: Value = serde_json::from_str(arguments).map_err(|error| {
-            ApiError::upstream_error(format!(
-                "custom tool '{name}' returned invalid arguments: expected JSON object: {error}"
-            ))
-        })?;
-        if value.get(CUSTOM_TOOL_INPUT_PROPERTY).is_none()
-            && (value.get("hunks").is_some() || value.get("raw_patch").is_some())
-        {
-            return apply_patch_tool::structured_arguments_to_patch(arguments);
-        }
+        return Ok(apply_patch_tool::native_input_from_chat_arguments(
+            arguments,
+        ));
     }
 
     let value: Value = serde_json::from_str(arguments).map_err(|error| {
@@ -111,19 +104,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn custom_tool_input_requires_single_string_input_field() {
+    fn apply_patch_accepts_valid_input_field() {
         assert_eq!(
             custom_tool_input_from_arguments("apply_patch", r#"{"input":"patch"}"#).unwrap(),
             "patch"
         );
-        assert!(
+        assert_eq!(
             custom_tool_input_from_arguments("apply_patch", r#"{"input":"patch","extra":1}"#)
-                .unwrap_err()
-                .to_string()
-                .contains("expected exactly one string field")
+                .unwrap(),
+            r#"{"input":"patch","extra":1}"#
         );
         assert!(
             custom_tool_input_from_arguments("apply_patch", r#"{"input":1}"#)
+                .unwrap()
+                .contains(r#""input":1"#)
+        );
+    }
+
+    #[test]
+    fn apply_patch_preserves_invalid_arguments_as_native_input() {
+        assert_eq!(
+            custom_tool_input_from_arguments("apply_patch", "[not json").unwrap(),
+            "[not json"
+        );
+        assert_eq!(
+            custom_tool_input_from_arguments("apply_patch", r#"{"input":"patch","extra":1}"#)
+                .unwrap(),
+            r#"{"input":"patch","extra":1}"#
+        );
+        assert_eq!(
+            custom_tool_input_from_arguments("apply_patch", r#"{"hunks":[{"path":"a"}]}"#).unwrap(),
+            r#"{"hunks":[{"path":"a"}]}"#
+        );
+    }
+
+    #[test]
+    fn non_apply_patch_custom_tools_remain_strict() {
+        assert!(
+            custom_tool_input_from_arguments("custom_editor", r#"{"input":1}"#)
                 .unwrap_err()
                 .to_string()
                 .contains("must be a string")

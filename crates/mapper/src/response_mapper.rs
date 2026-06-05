@@ -426,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn non_streaming_custom_tool_requires_exact_string_input() {
+    fn non_streaming_apply_patch_preserves_invalid_arguments_as_native_input() {
         let tools = vec![ResponseTool::Custom {
             name: "apply_patch".into(),
             description: "Apply a patch".into(),
@@ -470,8 +470,45 @@ mod tests {
             )]),
             None,
         );
-        let err = map_chat_response_to_responses(
+        let mapped = map_chat_response_to_responses(
             &bad_response,
+            "resp_test",
+            "msg_test",
+            &context,
+            &default_request(Some(tools)),
+            &MappingConfig::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            &mapped.output[0],
+            ResponseOutputItem::CustomToolCall { input, .. } if input == "{\"input\":1}"
+        ));
+    }
+
+    #[test]
+    fn non_streaming_other_custom_tool_requires_exact_string_input() {
+        let tools = vec![ResponseTool::Custom {
+            name: "custom_editor".into(),
+            description: "Edit".into(),
+            format: CustomToolFormat {
+                format_type: "grammar".into(),
+                syntax: "lark".into(),
+                definition: "start: /.+/".into(),
+            },
+        }];
+        let context = ChatToolContext::from_response_tools(&tools);
+        let response = chat_response(
+            None,
+            Some(vec![chat_tool_call(
+                "call_1",
+                "custom_editor",
+                "{\"input\":1}",
+            )]),
+            None,
+        );
+
+        let err = map_chat_response_to_responses(
+            &response,
             "resp_test",
             "msg_test",
             &context,
