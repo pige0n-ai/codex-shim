@@ -1355,7 +1355,7 @@ async fn direct_chat_stream_custom_tool_argument_chunks_emit_heartbeat_without_p
 #[tokio::test]
 async fn direct_chat_stream_mapper_failure_persists_debug_artifact() {
     let mock = MockUpstream::start(Scenario::ChatStreamToolCall {
-        tool_name: "apply_patch".into(),
+        tool_name: "custom_editor".into(),
         tool_args: serde_json::json!({}),
         text_before: String::new(),
         model: "mock-model".into(),
@@ -1377,7 +1377,7 @@ async fn direct_chat_stream_mapper_failure_persists_debug_artifact() {
             "stream": true,
             "tools": [{
                 "type": "custom",
-                "name": "apply_patch",
+                "name": "custom_editor",
                 "description": "edit files",
                 "format": {
                     "type": "grammar",
