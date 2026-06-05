@@ -474,6 +474,7 @@ impl StreamState {
                 .as_deref()
                 .is_some_and(|value| !value.is_empty())
             && !self.is_tool_search(&self.tools[pos])
+            && !self.is_custom_tool(&self.tools[pos])
         {
             let output_index = self.next_output_index();
             self.tools[pos].output_index = Some(output_index);
@@ -1016,7 +1017,7 @@ mod tests {
             "msg_test".into(),
             context,
         );
-        state
+        let first_events = state
             .process_chunk(&chunk(
                 None,
                 None,
@@ -1031,7 +1032,21 @@ mod tests {
                 false,
             ))
             .unwrap();
+        assert!(!first_events.iter().any(|event| matches!(
+            event,
+            ResponseSseEvent::ResponseOutputItemAdded {
+                item: ResponseOutputItem::CustomToolCall { .. },
+                ..
+            }
+        )));
         let events = state.complete().unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ResponseSseEvent::ResponseOutputItemAdded {
+                item: ResponseOutputItem::CustomToolCall { input, .. },
+                ..
+            } if input.is_empty()
+        )));
         assert!(events.iter().any(|event| matches!(
             event,
             ResponseSseEvent::ResponseCustomToolCallInputDone { input, .. } if input == "patch"
@@ -1042,6 +1057,62 @@ mod tests {
                 item: ResponseOutputItem::CustomToolCall { input, .. },
                 ..
             } if input == "patch"
+        )));
+    }
+
+    #[test]
+    fn apply_patch_invalid_arguments_are_emitted_as_native_tool_input() {
+        let context = ChatToolContext::from_response_tools(&[ResponseTool::Custom {
+            name: "apply_patch".into(),
+            description: "Apply a patch".into(),
+            format: CustomToolFormat {
+                format_type: "grammar".into(),
+                syntax: "lark".into(),
+                definition: "start: /.+/".into(),
+            },
+        }]);
+        let mut state = StreamState::new(
+            "resp_test".into(),
+            "test-model".into(),
+            1,
+            "msg_test".into(),
+            context,
+        );
+        let bad_arguments = "[not json";
+        let first_events = state
+            .process_chunk(&chunk(
+                None,
+                None,
+                Some(vec![tool_delta(
+                    0,
+                    Some("call_1"),
+                    Some("apply_patch"),
+                    Some(bad_arguments),
+                )]),
+                Some("tool_calls"),
+                None,
+                false,
+            ))
+            .unwrap();
+        assert!(!first_events.iter().any(|event| matches!(
+            event,
+            ResponseSseEvent::ResponseOutputItemAdded {
+                item: ResponseOutputItem::CustomToolCall { .. },
+                ..
+            }
+        )));
+
+        let events = state.complete().unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ResponseSseEvent::ResponseCustomToolCallInputDone { input, .. } if input == bad_arguments
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ResponseSseEvent::ResponseOutputItemDone {
+                item: ResponseOutputItem::CustomToolCall { input, .. },
+                ..
+            } if input == bad_arguments
         )));
     }
 
